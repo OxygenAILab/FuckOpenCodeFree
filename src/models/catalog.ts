@@ -2,11 +2,17 @@ import { JsonFileStore } from "../storage/jsonFile.js";
 
 export const DEFAULT_MODELS = [
   "big-pickle",
-  "nemotron-3-ultra-free",
-  "nemotron-3.5-lightning-free",
-  "mimo-v2.5-free",
-  "ling-3.0-flash-fin-free",
-  "muse-spark-1.3-contributor-free",
+  "space-bunny",
+  "ll-alpha",
+  "nemotron-3.5-lightning",
+  "nemotron-3.5-super-vl",
+  "mimo-v2.6-flash",
+  "deepseek-v4.1-flash",
+  "glm-5.3-flash",
+  "longcat-2.5-preview",
+  "muse-spark-1.3-contributor",
+  // Decision model, not a chat model: served over /v1/systemone.
+  "jev-1.13",
 ] as const;
 
 /**
@@ -14,6 +20,23 @@ export const DEFAULT_MODELS = [
  * startup so existing deployments don't encounter 401 errors after upgrade.
  */
 export const RETIRED_MODELS: ReadonlyArray<{ id: string; reason: string }> = [
+  // Renamed: the client-facing ids dropped the upstream `-free` suffix, and the
+  // gateway re-adds it when building the upstream request.
+  { id: "space-bunny-free", reason: "Renamed to space-bunny" },
+  { id: "ll-alpha-free", reason: "Renamed to ll-alpha" },
+  { id: "nemotron-3.5-lightning-free", reason: "Renamed to nemotron-3.5-lightning" },
+  { id: "nemotron-3.5-super-vl-free", reason: "Renamed to nemotron-3.5-super-vl" },
+  { id: "mimo-v2.6-flash-free", reason: "Renamed to mimo-v2.6-flash" },
+  { id: "deepseek-v4.1-flash-free", reason: "Renamed to deepseek-v4.1-flash" },
+  { id: "glm-5.3-flash-free", reason: "Renamed to glm-5.3-flash" },
+  { id: "longcat-2.5-preview-free", reason: "Renamed to longcat-2.5-preview" },
+  { id: "muse-spark-1.3-contributor-free", reason: "Renamed to muse-spark-1.3-contributor" },
+  // This one is accepted upstream but never answers: the request is held open
+  // with `: keep-alive` comments for ~300s and then closes without any data.
+  { id: "nemotron-3-ultra", reason: "Upstream holds the stream open ~300s and never sends a completion" },
+  { id: "nemotron-3-ultra-free", reason: "Upstream holds the stream open ~300s and never sends a completion" },
+  { id: "mimo-v2.5-free", reason: "Deprecated by upstream, superseded by mimo-v2.6-flash-free" },
+  { id: "ling-3.0-flash-fin-free", reason: "Upstream answers 'Model is unavailable'" },
   { id: "nemotron-3-super-free", reason: "Model no longer supported by upstream" },
   { id: "minimax-m3-free", reason: "Free promotion ended, now requires OpenCode Go subscription" },
   { id: "north-mini-code-free", reason: "Model no longer offered as a free model by upstream" },

@@ -3,7 +3,7 @@ import type { ApiKeyStore } from "../auth/apiKeys.js";
 import type { AppConfig } from "../config/env.js";
 import type { ModelConfigStore } from "../models/catalog.js";
 import type { SettingsStore } from "../settings/settingsStore.js";
-import { prepareZenRequest, pipeZenOpenAIResponse } from "../providers/zenClient.js";
+import { errorPayload, prepareZenRequest, pipeZenOpenAIResponse, requestZenFull } from "../providers/zenClient.js";
 import { pipeAnthropicSseAsOpenAI } from "../converters/anthropicSseToOpenAi.js";
 import { pipeOpenAiStreamStrippingThink } from "../converters/openAiThinkTagToReasoning.js";
 import { SessionStore, sessionScopeFromHeaders } from "../sessions/sessionStore.js";
@@ -137,6 +137,19 @@ export const registerOpenAIRoutes = async (
       sessionId,
     }, effectiveProxyPool);
 
+    // Upstream only serves streamed completions, so a client asking for a
+    // single JSON body gets one assembled from the stream here.
+    if (!isStream) {
+      try {
+        const zenResp = await requestZenFull(prepared, effectiveProxyPool, metrics);
+        if (zenResp.status === 200 && zenResp.data) return reply.code(200).send(zenResp.data);
+        return reply.code(zenResp.status).send(errorPayload(zenResp.status, zenResp.data, "Upstream request failed"));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Unknown upstream error";
+        return reply.code(502).send({ error: { message, type: "upstream_error" } });
+      }
+    }
+
     reply.hijack();
     if (isStream && activeSettings.openAiStreamTransformModels.includes(model)) {
       pipeAnthropicSseAsOpenAI(prepared, model, reply.raw, effectiveProxyPool, metrics);
@@ -146,6 +159,6 @@ export const registerOpenAIRoutes = async (
       pipeOpenAiStreamStrippingThink(prepared, model, reply.raw, effectiveProxyPool, metrics);
       return;
     }
-    pipeZenOpenAIResponse(prepared, isStream, reply.raw, effectiveProxyPool, metrics);
+    pipeZenOpenAIResponse(prepared, true, reply.raw, effectiveProxyPool, metrics);
   });
 };

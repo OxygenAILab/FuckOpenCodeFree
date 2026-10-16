@@ -199,18 +199,21 @@ export const pipeZenAsAnthropic = (prepared: ZenPreparedRequest, model: string, 
       if (!firstChunkHandled) {
         firstChunkHandled = true;
         const trimmed = str.trim();
-        if (trimmed.startsWith("{") && (trimmed.includes("FreeUsageLimitError") || trimmed.includes('"error"'))) {
+        const upstreamStatus = zenRes.statusCode || 502;
+        if (trimmed.startsWith("{") && (upstreamStatus !== 200 || trimmed.includes("FreeUsageLimitError") || trimmed.includes('"error"'))) {
           try {
             const parsed = JSON.parse(trimmed);
             if (parsed.error || parsed.type === "error") {
-              const errMsg = parsed.error?.message || parsed.message || "Rate limit";
+              const errMsg = parsed.error?.message || parsed.message || "Upstream request failed";
               if (prepared.lease?.node && proxyPool) {
-                proxyPool.markFailure(prepared.lease.node.id, errMsg, { statusCode: 429 });
+                proxyPool.markFailure(prepared.lease.node.id, errMsg, { statusCode: upstreamStatus });
                 markedFailure = true;
               }
               if (!res.headersSent) {
-                res.writeHead(429, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ type: "error", error: { type: "rate_limit_error", message: `${errMsg} (free model rate limit)` } }));
+                const errType =
+                  upstreamStatus === 429 ? "rate_limit_error" : upstreamStatus === 401 || upstreamStatus === 403 ? "permission_error" : "upstream_error";
+                res.writeHead(upstreamStatus, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ type: "error", error: { type: errType, message: errMsg } }));
               }
               zenRes.resume();
               return;

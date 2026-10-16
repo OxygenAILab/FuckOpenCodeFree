@@ -30,15 +30,25 @@ OpenCodeProxyHub 默认内置以下免费模型，均可通过 OpenAI 兼容接�
 | 模型 ID | 说明 |
 |--------|------|
 | `big-pickle` | OpenCode 免费模型（stealth） |
-| `nemotron-3-ultra-free` | Nvidia Nemotron 3 Ultra 免费模型 |
-| `nemotron-3.5-lightning-free` | Nvidia Nemotron 3.5 Lightning 免费模型 |
-| `mimo-v2.5-free` | Mimo v2.5 免费模型 |
-| `ling-3.0-flash-fin-free` | Ling 3.0 Flash Fin 免费模型 |
-| `muse-spark-1.3-contributor-free` | Muse Spark 1.3 Contributor 免费模型 |
+| `space-bunny` | Space Bunny 免费模型 |
+| `ll-alpha` | LL Alpha 免费模型 |
+| `nemotron-3.5-lightning` | Nvidia Nemotron 3.5 Lightning 免费模型 |
+| `nemotron-3.5-super-vl` | Nvidia Nemotron 3.5 Super VL 免费模型 |
+| `mimo-v2.6-flash` | Mimo v2.6 Flash 免费模型（后端 1M 上下文） |
+| `deepseek-v4.1-flash` | DeepSeek V4.1 Flash 免费模型（后端 1M 上下文） |
+| `glm-5.3-flash` | GLM 5.3 Flash 免费模型 |
+| `longcat-2.5-preview` | LongCat 2.5 Preview 免费模型 |
+| `nemotron-3-ultra` | Nvidia Nemotron 3 Ultra 免费模型（已移出上游目录但仍可服务，首字可达数分钟） |
+| `muse-spark-1.3-contributor` | Muse Spark 1.3 Contributor 免费模型 |
+| `jev-1.13` | TypeSafe System One 决策模型（走 `/v1/systemone`，不是对话模型） |
 
-> **区域说明**：`muse-spark-1.3-contributor-free` 部分区域可能被上游按地区限制（实测部分地区返回 403）；若所在区域不可用，可配合出口代理或直接禁用该模型。该模型为 Contributor 定价（以 prompt/completion 换训练授权），使用前请阅读相关条款。
+> **命名规则**：对外模型名不带上游的 `-free` 后缀，网关在发请求时把它补回去（`space-bunny` → 上游 `space-bunny-free`），流式与非流式响应也都会把模型名改回对外名。上游 id 本身无后缀的模型（目前只有 `big-pickle`）登记在 `src/models/naming.ts` 的 `UPSTREAM_MODEL_EXCEPTIONS`。
 
-新部署会自动生成以上默认模型；已有部署升级后，缺失的默认免费模型会自动追加到已有 `models.json`，不会覆盖用户已修改的模型配置。已下线的模型（如 `laguna-s-2.1-free`、`muse-spark-1.2-contributor-free`、`deepseek-v4-flash-free`、`hy3-free`、`x-preview-f-free`、`north-mini-code-free`、`ling-3.0-flash-free`、`longcat-2.0-free`）会在升级时自动禁用并标记下线原因，用户无需手动清理。此前被自动禁用的模型若重新上线，升级后会仅恢复带下线标注的条目自动重新启用；用户手动关闭的不受影响。
+> **区域说明**：`beam`、`muse-spark-1.2-contributor`、`muse-spark-1.3-contributor` 会被上游按地区限制（实测中国大陆出口返回 403 `This model is not available in your country`，经香港出口代理复测同样 403）；若所在区域不可用，直接禁用该模型即可。`muse-spark` 系列为 Contributor 定价（以 prompt/completion 换训练授权），使用前请阅读相关条款。
+
+> **上游指纹门（2026-10-11 起）**：免费层已从 `/zen/v1` 迁到 `/inference/v1`，旧路径对匿名请求一律返回 `403 FreeTierError`。网关按实测通过条件构造请求：走 `/inference/v1`；强制 `stream: true`（非流式客户端由网关把 SSE 折叠成单个 JSON 响应）；请求体必须带 `bash` 与 `read` 两个工具（按小写名精确匹配，各自带真实参数 schema，缺失即 403，网关会自动补齐占位工具）；四个 session 头 `x-opencode-session`、`x-opencode-session-id`、`x-session-affinity`、`x-session-id` 必须同值；`x-opencode-project` 只能是字面量 `global`；**不发** `x-opencode-request` 与 `HTTP-Referer`；session id 前 12 位 hex 必须是取反后的时间戳（`ses_` 降序），纯随机或摘要派生即拒。上游错误现在按真实状态码透传（403 不再被改写成 429）。
+
+新部署会自动生成以上默认模型；已有部署升级后，缺失的默认免费模型会自动追加到已有 `models.json`，不会覆盖用户已修改的模型配置。带旧 `-free` 后缀的条目会在升级时自动禁用并标注 `(retired: Renamed to …)`；上游已下线的模型（如 `mimo-v2.5-free`、`ling-3.0-flash-fin-free`、`laguna-s-2.1-free`、`deepseek-v4-flash-free`、`hy3-free`、`x-preview-f-free`、`north-mini-code-free`、`longcat-2.0-free`）同样会自动禁用并标记原因，用户无需手动清理。此前被自动禁用的模型若重新上线，升级后会仅恢复带下线标注的条目自动重新启用；用户手动关闭的不受影响。
 
 ## 部署方式
 
@@ -116,11 +126,20 @@ npm start            # 运行已构建的 dist/main.js
 
 ## 功能总览
 
-- **双协议兼容**
-  - OpenAI 兼容：`POST /v1/chat/completions`、`GET /v1/models`
+- **协议面**
+  - OpenAI 兼容：`POST /v1/chat/completions`、`POST /v1/responses`、`GET /v1/models`
   - Anthropic 兼容：`POST /v1/messages`
+  - TypeSafe System One：`POST /v1/systemone`（`jev-*` 决策模型）
   - 同时支持流式（SSE）与非流式
-- **默认免费模型**：内置 6 个可用免费模型，详见上方“可用免费模型”
+  - `API_SURFACE=openai` 时可只挂载 OpenAI 那三条路由，用于本机/内网部署
+- **Responses API 转换**：上游 Zen 对 `/inference/v1/responses` 只回
+  `ModelProtocolUnsupported`，所以 `POST /v1/responses` 由网关把 Responses 请求翻成
+  chat completions，再把流式增量重新编码成 Responses 事件（`response.output_item.added`
+  / `response.output_text.delta` / `response.function_call_arguments.delta` /
+  `response.completed` 等），Codex 这类只会说 Responses 协议的客户端可以直接接
+- **System One（Jev）**：TypeSafe 的决策模型不是对话模型，只接受 `state` + 类型化
+  `questions`，返回校准概率。上游对部分区域返回 451，需要非受限出口
+- **默认免费模型**：内置 11 个可用免费模型，详见上方“可用免费模型”
 - **流式归一化转换（可按模型开启）**
   - `anthropic-sse-to-openai`：把上游的 Anthropic 风格 SSE 转成 OpenAI 风格 SSE
   - `think-to-reasoning`：把内联在 `delta.content` 里的 `<think>...</think>` 推理内容抽取到 `reasoning_content` 字段，正文只保留答案（支持标签跨 chunk 的状态机处理）
@@ -244,7 +263,7 @@ curl -N http://127.0.0.1:6446/v1/chat/completions \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "hy3-free",
+    "model": "deepseek-v4.1-flash",
     "stream": true,
     "messages": [{"role": "user", "content": "用一句话介绍你自己"}]
   }'
@@ -257,9 +276,45 @@ curl http://127.0.0.1:6446/v1/messages \
   -H "x-api-key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek-v4-flash-free",
+    "model": "mimo-v2.6-flash",
     "max_tokens": 256,
     "messages": [{"role": "user", "content": "Hello"}]
+  }'
+```
+
+OpenAI Responses（Codex 等只说 Responses 协议的客户端用这条）：
+
+```bash
+curl http://127.0.0.1:6446/v1/responses \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "big-pickle",
+    "input": "用一句话介绍你自己",
+    "stream": true
+  }'
+```
+
+TypeSafe System One（`jev-*` 决策模型，返回校准概率而不是文本）：
+
+```bash
+curl http://127.0.0.1:6446/v1/systemone \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "jev-1.13",
+    "state": "I have been trying to connect my Stripe account for 3 days and the integration keeps failing.",
+    "questions": {
+      "urgency": {"type": "noul", "instructions": "Does this message express urgency?"},
+      "team": {
+        "type": "choice",
+        "instructions": "Which team should handle this",
+        "criteria": {
+          "billing": "Payments, invoices, refunds",
+          "technical": "Integration errors, API failures, bugs"
+        }
+      }
+    }
   }'
 ```
 
@@ -290,7 +345,9 @@ PROXIES_FILE=./proxies.json             # 代理池文件
 LOGS_DIR=./logs                         # 日志目录
 ADMIN_PASSWORD=admin                    # 管理接口/控制台密码（务必修改）
 ZEN_HOST=opencode.ai                    # 上游主机
-ZEN_PATH=/zen/v1/chat/completions       # 上游路径
+ZEN_PATH=/inference/v1/chat/completions  # 上游对话补全路径
+ZEN_SYSTEMONE_PATH=/inference/v1/systemone  # 上游 System One（jev-*）路径
+API_SURFACE=all                          # all=全协议；openai=只挂 OpenAI 三条路由
 UPSTREAM_TIMEOUT_MS=120000              # 上游超时
 GLOBAL_REQUESTS_PER_MINUTE=120          # 全局每分钟请求上限
 API_KEY_REQUESTS_PER_MINUTE=60          # 单 Key 每分钟请求上限
@@ -369,7 +426,7 @@ curl -X POST http://127.0.0.1:6446/admin/api-keys \
 curl -X PATCH http://127.0.0.1:6446/admin/settings \
   -H "Authorization: Bearer YOUR_ADMIN_PASSWORD" \
   -H "Content-Type: application/json" \
-  -d '{"reasoningTagModels":["deepseek-v4-flash-free"]}'
+  -d '{"reasoningTagModels":["big-pickle"]}'
 ```
 
 ## 本地数据文件
@@ -414,6 +471,7 @@ API Key 文件结构（节选）：
 ## 文档
 
 - [`DEPLOYMENT.md`](./DEPLOYMENT.md) — 部署、健康检查、备份、升级
+- [`VERIFICATION.md`](./VERIFICATION.md) — 上游指纹门的实测证据、逐模型可用性与部署记录
 - [`DEVELOPMENT_LOG.md`](./DEVELOPMENT_LOG.md) — 分阶段实现计划与开发记录
 
 ## 许可证
@@ -436,6 +494,21 @@ OpenCodeProxyHub 复现并扩展了原项目的核心兼容行为（OpenAI/Anthr
 OpenCodeProxyHub 独立维护，与 OpenCode、`opencode-free-proxy` 及任何上游服务方均无隶属关系。
 
 ## 更新记录
+
+- **v0.2.0（本仓 fork 起点，OxygenAILab/FreeOpenCodeZen）**
+  - 修复上游 2026-10-11 的迁移：上游路径改为 `/inference/v1`，按实测指纹构造请求
+    （强制 `stream: true`、补齐 `bash`/`read` 工具、四个同值 session 头、不发
+    `x-opencode-request` 与 `HTTP-Referer`、session id 用规范铸造）。原样代码在此之后
+    对所有免费模型返回 403/429。
+  - 错误按上游真实状态码透传，不再把 403 统一改写成 429。
+  - 对外模型名去掉 `-free` 后缀，发请求时补回；流式与非流式的响应回显都改回对外名。
+  - 新增 `POST /v1/responses`：把 Responses 协议翻成 chat completions 再转回 Responses 事件。
+  - 新增 `POST /v1/systemone`：透传 TypeSafe System One（`jev-1.13`）决策模型。
+  - 新增 `API_SURFACE`，可只挂 OpenAI 三条路由，供本机/内网部署。
+  - 把 Node 的 `server.requestTimeout` 提到 `upstreamTimeoutMs + 60s`（默认 300s 会静默切断长流）。
+  - 上游返回空流（只有 `: keep-alive`）时非流式路径报 502，不再当作成功。
+  - `scripts/hub-service.cmd` + `hub-service.vbs` 提供 Windows 登录自启与崩溃自愈。
+  - 实测证据与逐模型结果见 [`VERIFICATION.md`](./VERIFICATION.md)。
 
 - **v0.1.9**：同步官方 Zen 免费模型：新增 `ling-3.0-flash-fin-free`（实测可用）与 `muse-spark-1.3-contributor-free`（Muse Spark 1.3，注意本地区可能 403）两个默认免费模型；退役 `laguna-s-2.1-free`（上游 401 下线）与 `muse-spark-1.2-contributor-free`（被 1.3 取代）。默认免费模型保持 6 个。升级后自动禁用退役模型、追加缺失默认模型，不覆盖用户已有配置；老设备升级无需手动改 `models.json`
 - **v0.1.8**：同步官方 Zen 免费模型：退役 `deepseek-v4-flash-free`（免费期结束，上游 400 不可用）、`hy3-free`（再次下线，上游 401）、`x-preview-f-free`（Ox Alpha，上游 401 不可用）；`muse-spark-1.2-contributor-free` 保留启用（注意本地区可能 403）。默认免费模型更新为 6 个。升级后自动禁用退役模型、追加缺失默认模型，不覆盖用户已有配置

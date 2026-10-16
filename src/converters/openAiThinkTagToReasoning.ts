@@ -1,5 +1,6 @@
 import https from "node:https";
 import type { ServerResponse } from "node:http";
+import { errorPayload } from "../providers/zenClient.js";
 import type { ZenPreparedRequest } from "../providers/zenClient.js";
 import type { ProxyPoolStore } from "../proxy/proxyPool.js";
 import type { MetricsStore } from "../observability/metrics.js";
@@ -169,20 +170,21 @@ export const pipeOpenAiStreamStrippingThink = (
       // First-chunk error/rate-limit detection (mirrors pipeZenOpenAIResponse).
       if (!firstChunkChecked) {
         const str = buffer.trim();
-        if (str.startsWith("{") && (str.includes("FreeUsageLimitError") || str.includes('"error"'))) {
+        const upstreamStatus = zenRes.statusCode || 502;
+        if (str.startsWith("{") && (upstreamStatus !== 200 || str.includes("FreeUsageLimitError") || str.includes('"error"'))) {
           try {
             const parsed = JSON.parse(str);
             if (parsed.error || parsed.type === "error") {
               firstChunkChecked = true;
               aborted = true;
-              const errMsg = parsed.error?.message || parsed.message || "Rate limit exceeded";
+              const errMsg = parsed.error?.message || parsed.message || "Upstream request failed";
               if (prepared.lease?.node && proxyPool) {
-                proxyPool.markFailure(prepared.lease.node.id, errMsg, { statusCode: 429 });
+                proxyPool.markFailure(prepared.lease.node.id, errMsg, { statusCode: upstreamStatus });
                 markedFailure = true;
               }
               if (!res.headersSent) {
-                res.writeHead(429, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ error: { message: `${errMsg} (free model rate limit)`, type: "rate_limit_error", code: "rate_limit_exceeded" } }));
+                res.writeHead(upstreamStatus, { "Content-Type": "application/json" });
+                res.end(JSON.stringify(errorPayload(upstreamStatus, parsed, errMsg)));
               }
               zenRes.resume();
               return;

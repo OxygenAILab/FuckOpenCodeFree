@@ -30,6 +30,13 @@ export interface AppConfig {
   adminPassword: string;
   zenHost: string;
   zenPath: string;
+  /** TypeSafe System One (`jev-*`) path; those models are not chat models. */
+  zenSystemOnePath: string;
+  /**
+   * Which protocol surfaces to serve. `all` exposes OpenAI, Anthropic and
+   * System One; `openai` exposes only the OpenAI-compatible routes.
+   */
+  apiSurface: "all" | "openai";
   upstreamTimeoutMs: number;
   globalRequestsPerMinute: number;
   apiKeyRequestsPerMinute: number;
@@ -54,7 +61,15 @@ export const loadConfig = (): AppConfig => ({
   logsDir: process.env.LOGS_DIR || "./logs",
   adminPassword: process.env.ADMIN_PASSWORD || process.env.ADMIN_TOKEN || "admin",
   zenHost: process.env.ZEN_HOST || "opencode.ai",
-  zenPath: process.env.ZEN_PATH || "/zen/v1/chat/completions",
+  // The free tier moved off `/zen/v1` on 2026-10-11: the Zen routes became a
+  // thin proxy and the gate went down into a private inference service, so
+  // `/zen/v1` now answers every anonymous request with 403 FreeTierError while
+  // `/inference/v1` serves the same catalogue and accepts the same fingerprint.
+  zenPath: process.env.ZEN_PATH || "/inference/v1/chat/completions",
+  // TypeSafe's System One decision models (`jev-*`) answer on a sibling path
+  // with their own request shape; they are not chat models.
+  zenSystemOnePath: process.env.ZEN_SYSTEMONE_PATH || "/inference/v1/systemone",
+  apiSurface: process.env.API_SURFACE?.toLowerCase() === "openai" ? "openai" : "all",
   upstreamTimeoutMs: intFromEnv("UPSTREAM_TIMEOUT_MS", 120000),
   globalRequestsPerMinute: intFromEnv("GLOBAL_REQUESTS_PER_MINUTE", 120),
   apiKeyRequestsPerMinute: intFromEnv("API_KEY_REQUESTS_PER_MINUTE", 60),

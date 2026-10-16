@@ -9,6 +9,8 @@ import { registerOpenAIRoutes } from "./routes/openai.js";
 import { registerAnthropicRoutes } from "./routes/anthropic.js";
 import { registerAdminRoutes } from "./routes/admin.js";
 import { registerWebRoutes } from "./routes/web.js";
+import { registerSystemOneRoutes } from "./routes/systemone.js";
+import { registerResponsesRoutes } from "./routes/responses.js";
 import { ModelConfigStore } from "./models/catalog.js";
 import { SettingsStore } from "./settings/settingsStore.js";
 import { ProxyPoolStore } from "./proxy/proxyPool.js";
@@ -27,7 +29,15 @@ export const buildApp = async (config: AppConfig) => {
   settingsStore.load();
   const settings = settingsStore.get();
 
-  const app = Fastify({ logger: true, bodyLimit: settings.requestBodyLimitBytes });
+  // Node clears `server.requestTimeout` when the response finishes, not when the
+  // request body is read, so its 300s default silently kills any completion that
+  // streams for longer — the free tier's slow models routinely take 300s+. Keep
+  // it a minute past the upstream timeout so upstream is always the one to cut.
+  const app = Fastify({
+    logger: true,
+    bodyLimit: settings.requestBodyLimitBytes,
+    requestTimeout: settings.upstreamTimeoutMs + 60_000,
+  });
   const metrics = new MetricsStore();
   const eventLogger = new EventLogger(settingsStore, config.logsDir);
   registerMetricsHooks(app, metrics);
@@ -58,11 +68,15 @@ export const buildApp = async (config: AppConfig) => {
     await limiter.close();
   });
 
-  await registerHealthRoutes(app, modelStore);
+  await registerHealthRoutes(app, config, modelStore);
   await registerModelRoutes(app, modelStore);
   await registerAdminRoutes(app, config, keyStore, modelStore, settingsStore, proxyPool, limiter, requestTracker, metrics, eventLogger);
   await registerOpenAIRoutes(app, config, keyStore, modelStore, settingsStore, sessions, proxyPool, limiter, requestTracker, metrics, eventLogger);
-  await registerAnthropicRoutes(app, config, keyStore, modelStore, settingsStore, sessions, proxyPool, limiter, requestTracker, metrics, eventLogger);
+  await registerResponsesRoutes(app, config, keyStore, modelStore, settingsStore, sessions, proxyPool, limiter, requestTracker, metrics);
+  if (config.apiSurface === "all") {
+    await registerAnthropicRoutes(app, config, keyStore, modelStore, settingsStore, sessions, proxyPool, limiter, requestTracker, metrics, eventLogger);
+    await registerSystemOneRoutes(app, config, keyStore, modelStore, sessions, proxyPool, requestTracker, metrics);
+  }
   await registerWebRoutes(app);
 
   app.setNotFoundHandler(async (_request, reply) => {

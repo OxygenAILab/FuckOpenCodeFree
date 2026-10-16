@@ -1,40 +1,86 @@
 import https from "node:https";
-import crypto from "node:crypto";
 
 const ZEN_HOST = "opencode.ai";
-const ZEN_PATH = "/zen/v1/chat/completions";
-const OC_VERSION = "1.15.0";
+// The free tier moved off `/zen/v1` on 2026-10-11; that path now answers every
+// anonymous request with 403 FreeTierError.
+const ZEN_PATH = "/inference/v1/chat/completions";
+const OC_VERSION = "1.18.31";
 const TIMEOUT_MS = 120000;
 
-// 当前默认免费模型（v0.1.9）
+// Upstream model ids, not the client-facing names: this script talks to the
+// upstream endpoint directly, and there the `-free` suffix is part of the id.
+// The gateway strips it for clients (see src/models/naming.ts).
 const MODELS = [
   "big-pickle",
+  "space-bunny-free",
+  "ll-alpha-free",
   "nemotron-3-ultra-free",
   "nemotron-3.5-lightning-free",
-  "mimo-v2.5-free",
-  "ling-3.0-flash-fin-free",
-  "muse-spark-1.3-contributor-free",
-  // 已退役/不可用，保留监控是否回归
-  "laguna-s-2.1-free",
+  "nemotron-3.5-super-vl-free",
+  "mimo-v2.6-flash-free",
+  "deepseek-v4.1-flash-free",
+  "glm-5.3-flash-free",
+  "longcat-2.5-preview-free",
+  "beam-free",
+  "jev-1.13-free",
   "muse-spark-1.2-contributor-free",
-  "deepseek-v4-flash-free",
-  "hy3-free",
-  "x-preview-f-free",
+  "muse-spark-1.3-contributor-free",
 ];
 
-const ocId = (prefix) => {
-  const ts = Date.now().toString(16);
-  const rnd = crypto.randomBytes(12).toString("base64url").slice(0, 16);
-  return `${prefix}_${ts}${rnd}`;
+const ID_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+let lastIdTimestamp = 0;
+let idCounter = 0;
+
+/** Mint an id in the shape the gateway validates: six timestamp bytes, then 14 base62. */
+const ocId = (prefix, descending = true) => {
+  const timestamp = Date.now();
+  if (timestamp !== lastIdTimestamp) {
+    lastIdTimestamp = timestamp;
+    idCounter = 0;
+  }
+  idCounter += 1;
+  let value = BigInt(timestamp) * 0x1000n + BigInt(idCounter);
+  if (descending) value = ~value;
+  let time = "";
+  for (let index = 0; index < 6; index += 1) {
+    time += Number((value >> BigInt(40 - 8 * index)) & 0xffn).toString(16).padStart(2, "0");
+  }
+  let random = "";
+  for (let index = 0; index < 14; index += 1) {
+    random += ID_ALPHABET[Math.floor(Math.random() * ID_ALPHABET.length)];
+  }
+  return `${prefix}_${time}${random}`;
 };
+
+const ZEN_TOOLS = [
+  {
+    type: "function",
+    function: {
+      name: "bash",
+      description: "Requirement placeholder from OpenCode Zen: this gateway cannot execute it.",
+      parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "read",
+      description: "Requirement placeholder from OpenCode Zen: this gateway cannot execute it.",
+      parameters: { type: "object", properties: { file_path: { type: "string" } }, required: ["file_path"] },
+    },
+  },
+];
 
 const testModel = (model) => {
   return new Promise((resolve) => {
     const started = Date.now();
+    const session = ocId("ses");
     const body = JSON.stringify({
       model,
       messages: [{ role: "user", content: "Reply with exactly: OK" }],
-      stream: false,
+      // The gate requires `stream: true` and a tool list carrying `bash`+`read`.
+      stream: true,
+      tools: ZEN_TOOLS,
     });
     const options = {
       hostname: ZEN_HOST,
@@ -48,8 +94,10 @@ const testModel = (model) => {
         "User-Agent": `opencode/${OC_VERSION} ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.13`,
         "x-opencode-client": "cli",
         "x-opencode-project": "global",
-        "x-opencode-request": ocId("msg"),
-        "x-opencode-session": ocId("ses"),
+        "x-opencode-session": session,
+        "x-opencode-session-id": session,
+        "x-session-affinity": session,
+        "x-session-id": session,
       },
       timeout: TIMEOUT_MS,
     };
@@ -61,7 +109,22 @@ const testModel = (model) => {
         const durationMs = Date.now() - started;
         const raw = Buffer.concat(chunks).toString();
         let data = null;
-        try { data = JSON.parse(raw); } catch {}
+        if (res.statusCode === 200) {
+          // The gate only serves SSE, so fold the deltas back into one message.
+          let text = "";
+          for (const line of raw.split(/\r?\n/)) {
+            if (!line.startsWith("data:")) continue;
+            const payload = line.slice(5).trim();
+            if (!payload || payload === "[DONE]") continue;
+            try {
+              const chunk = JSON.parse(payload);
+              text += chunk.choices?.[0]?.delta?.content ?? "";
+            } catch {}
+          }
+          data = { choices: [{ message: { content: text } }] };
+        } else {
+          try { data = JSON.parse(raw); } catch {}
+        }
         resolve({
           model,
           status: res.statusCode,
