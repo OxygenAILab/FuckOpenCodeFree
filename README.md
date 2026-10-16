@@ -471,6 +471,7 @@ API Key 文件结构（节选）：
 ## 文档
 
 - [`DEPLOYMENT.md`](./DEPLOYMENT.md) — 部署、健康检查、备份、升级
+- [`DEPLOYMENTS.md`](./DEPLOYMENTS.md) — 本仓当前实际运行的实例、端点与运维命令
 - [`VERIFICATION.md`](./VERIFICATION.md) — 上游指纹门的实测证据、逐模型可用性与部署记录
 - [`DEVELOPMENT_LOG.md`](./DEVELOPMENT_LOG.md) — 分阶段实现计划与开发记录
 

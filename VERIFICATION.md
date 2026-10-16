@@ -201,3 +201,67 @@ kill node PID 11256  ->  15s 后 cmd 循环拉起新进程 PID 26992，端口 64
 
 要改成真正的 Windows 服务，需要在管理员 PowerShell 里用 S4U 主体重新注册（步骤见
 `DEPLOYMENT.md` 的 Windows Auto-Start 一节）。
+
+## 9. 三处部署（2026-10-17）
+
+| 位置 | 监听 | 协议面 | 入口 |
+|---|---|---|---|
+| HK `154.219.110.138` | `127.0.0.1:6446` | all | `https://ocz.oxygenai.top`（OpenResty + CloudFlare） |
+| WSL `Ubuntu-26.04` | `127.0.0.1:6447` | openai | 仅本机 |
+| Windows 本机 | `127.0.0.1:6446` | all | 仅本机（计划任务自启） |
+
+### Jev 的地区差异（实测）
+
+同一份请求，两个出口：
+
+```
+本机（中国大陆出口）   POST /inference/v1/systemone -> 451 Upstream request failed: Endpoint is unavailable.
+HK  服务器（香港出口）  POST /inference/v1/systemone -> 200 {"model":"jev-1.13-free","answers":{"urgency":{"noul":0.98}},...}
+```
+
+经网关后（`POST /v1/systemone`）同样成立：本机 451，HK 200 且回显名已是 `jev-1.13`。
+所以 Jev 只部署在 HK 那台；WSL 实例用 `API_SURFACE=openai` 干脆不挂这条路由。
+
+HK 上的多问题实测（`urgency` / `team` / `frustration` 同请求并行）：
+
+```json
+{"model":"jev-1.13",
+ "answers":{
+   "urgency":{"type":"noul","noul":0.98},
+   "team":{"type":"choice","choice":"technical","confidence":0.88,
+           "probabilities":{"billing":0.08,"technical":0.92,"sales":0}},
+   "frustration":{"type":"score","score":1.03,"confidence":0.95, ...}},
+ "usage":{"input_tokens":434,"output_tokens":71}}
+```
+
+### 公网验证（经 CloudFlare + OpenResty）
+
+```
+GET  https://ocz.oxygenai.top/health             200  {"status":"ok","version":"0.2.0","surface":"all","models":11,...}
+GET  https://ocz.oxygenai.top/v1/models          200  11 个模型
+POST https://ocz.oxygenai.top/v1/chat/completions 200 model=space-bunny content=OK
+POST https://ocz.oxygenai.top/v1/responses       200 status=completed text=OK
+POST https://ocz.oxygenai.top/v1/systemone       200 urgency 0.99
+POST https://ocz.oxygenai.top/v1/chat/completions (stream) 7 个 SSE chunk，模型名回显正确
+```
+
+`free.ocz.oxygenai.top` 解析得到 CloudFlare IP，但在边缘 TLS 握手失败：CloudFlare 通用证书的
+通配符只覆盖 `*.oxygenai.top` 一层，二级子域需要 Advanced Certificate。因此对外名用
+`ocz.oxygenai.top`。
+
+### Responses 端点验证
+
+上游对 `/inference/v1/responses` 一律回 `ModelProtocolUnsupported`，所以该协议在网关内转换：
+
+```
+事件序列（big-pickle, stream）:
+  response.created -> response.in_progress
+  -> response.output_item.added(reasoning) -> response.reasoning_summary_text.delta ×N
+  -> response.reasoning_summary_text.done -> response.output_item.done
+  -> response.output_item.added(message) -> response.content_part.added
+  -> response.output_text.delta -> response.output_text.done -> response.content_part.done
+  -> response.output_item.done -> response.completed -> [DONE]
+
+工具调用（deepseek-v4.1-flash + shell）:
+  output 里出现 {"type":"function_call","call_id":"...","name":"shell","arguments":"{...}"}
+```
