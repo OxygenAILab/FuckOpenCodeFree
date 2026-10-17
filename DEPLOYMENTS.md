@@ -100,6 +100,28 @@ Because the logon task boots the distro at sign-in, a normal reboot restores the
 | Surface | `API_SURFACE` unset (all) |
 | Log | `logs\service.log` |
 
+## 免费层出口节点（2026-10-17）
+
+免费层的 `403 FreeTierError` 由**出口 IP 信誉**决定，因此每个实例都需要在代理池里
+至少挂一个可用出口。当前配置：
+
+| 实例 | 出口节点 | 权重 | 状态 |
+|---|---|---|---|
+| Windows 桌面 | `http://127.0.0.1:7890`（本机 Clash） | 10 | 已验证 200 |
+| Windows 桌面 | `http://172.22.43.103:7890`（WSL Clash） | 5 | 备用，已验证 200 |
+| WSL `Ubuntu-26.04` | `http://127.0.0.1:7890`（WSL Clash） | 10 | 已验证 200 |
+| 香港 `ocz.oxygenai.top` | 无 | — | 直连出口 403，免费层不可用 |
+
+注意事项：
+
+- WSL 的 IP 会随发行版重启变化（当前 `172.22.43.103`）。Windows 上的备用节点指向
+  该 IP，`wsl --terminate` 之后需要用 `wsl.exe -d Ubuntu-26.04 -- hostname -I`
+  的新结果更新该节点（控制台或 `PATCH /admin/proxies/:id`），否则它会连接失败。
+- 出口节点一律用管理接口维护，不要手改 `proxies.json`：
+  `POST /admin/proxies`，`Authorization: Bearer <ADMIN_PASSWORD>`。
+- 香港实例要恢复免费层，必须提供一个在门禁看来干净的出口节点；该机器本地没有
+  运行任何代理，直连 IP 被判 403。
+
 ## Updating a Linux deployment
 
 ```bash

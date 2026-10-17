@@ -1,7 +1,8 @@
 import https from "node:https";
 import type { ServerResponse } from "node:http";
-import { errorPayload } from "../providers/zenClient.js";
+import { errorPayload, retryZenTransport, rotateZenAttempt } from "../providers/zenClient.js";
 import type { ZenPreparedRequest } from "../providers/zenClient.js";
+import { isFreeTierBody, tripFreeTierGate } from "../providers/upstreamGate.js";
 import type { ProxyPoolStore } from "../proxy/proxyPool.js";
 import type { MetricsStore } from "../observability/metrics.js";
 
@@ -160,6 +161,7 @@ export const pipeOpenAiStreamStrippingThink = (
   let receivedData = false;
   let firstChunkChecked = false;
   let aborted = false;
+  let retried = false;
 
   const req = https.request(prepared.options, (zenRes) => {
     zenRes.on("data", (chunk: Buffer) => {
@@ -178,7 +180,27 @@ export const pipeOpenAiStreamStrippingThink = (
               firstChunkChecked = true;
               aborted = true;
               const errMsg = parsed.error?.message || parsed.message || "Upstream request failed";
-              if (prepared.lease?.node && proxyPool) {
+              if (prepared.fingerprintLane && isFreeTierBody(upstreamStatus, parsed)) {
+                const next = rotateZenAttempt(prepared, proxyPool);
+                if (next) {
+                  retried = true;
+                  markedFailure = true;
+                  zenRes.resume();
+                  pipeOpenAiStreamStrippingThink(next, _model, res, proxyPool, metrics);
+                  return;
+                }
+                tripFreeTierGate(errMsg);
+                markedFailure = true;
+              } else if (prepared.fingerprintLane && upstreamStatus === 429) {
+                const next = retryZenTransport(prepared, proxyPool, errMsg, 429);
+                if (next) {
+                  retried = true;
+                  markedFailure = true;
+                  zenRes.resume();
+                  pipeOpenAiStreamStrippingThink(next, _model, res, proxyPool, metrics);
+                  return;
+                }
+              } else if (prepared.lease?.node && proxyPool) {
                 proxyPool.markFailure(prepared.lease.node.id, errMsg, { statusCode: upstreamStatus });
                 markedFailure = true;
               }
@@ -224,6 +246,7 @@ export const pipeOpenAiStreamStrippingThink = (
       }
       metrics?.recordUpstream({ statusCode: zenRes.statusCode || 502, durationMs: durationMs(), proxyId: prepared.lease?.node?.id });
 
+      if (retried) return;
       if (aborted) {
         if (!res.writableEnded) res.end();
         return;
@@ -251,11 +274,20 @@ export const pipeOpenAiStreamStrippingThink = (
   });
 
   req.on("error", (error) => {
+    if (retried) return;
+    metrics?.recordUpstream({ statusCode: 502, durationMs: durationMs(), proxyId: prepared.lease?.node?.id, error: error.message });
+    if (prepared.fingerprintLane && !res.headersSent) {
+      const next = retryZenTransport(prepared, proxyPool, error.message);
+      if (next) {
+        retried = true;
+        pipeOpenAiStreamStrippingThink(next, _model, res, proxyPool, metrics);
+        return;
+      }
+    }
     if (prepared.lease?.node && proxyPool && !markedFailure) {
       proxyPool.markFailure(prepared.lease.node.id, error.message);
       markedFailure = true;
     }
-    metrics?.recordUpstream({ statusCode: 502, durationMs: durationMs(), proxyId: prepared.lease?.node?.id, error: error.message });
     if (!res.headersSent) {
       res.writeHead(502, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: { message: `Upstream error: ${error.message}`, type: "upstream_error" } }));
@@ -266,6 +298,7 @@ export const pipeOpenAiStreamStrippingThink = (
 
   req.on("timeout", () => {
     req.destroy();
+    if (retried) return;
     if (prepared.lease?.node && proxyPool && !markedFailure) {
       proxyPool.markFailure(prepared.lease.node.id, "Upstream timeout");
       markedFailure = true;

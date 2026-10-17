@@ -1450,3 +1450,39 @@ Verified:
 - `GET /health` returns `status=ok`.
 - `GET /admin/settings` shows `openAiStreamTransformModels` persisted with `qwen3.6-plus-free` in Docker data.
 - Manual `qwen3.6-plus-free` streaming validation in local development returned OpenAI `data:` chunks with `reasoning_content`, final `content`, and terminal `data: [DONE]` without Anthropic `event:` frames.
+
+## 2026-10-17 — 免费层出口轮换（403 / 429 / 传输层失败）
+
+Context:
+
+- 上游门禁收紧后，同一请求形态在大陆直连 403、经代理出口 200，确认判定依据是出口 IP；
+  官方 issue `anomalyco/opencode#56324` 在同一时段复现，说明这不是请求形态退化。
+- 参考仓库 `Majesticrise/OpenCodeProxy`（Rust）的有效做法是"403 换代理 + 换 session 重试"，
+  因此移植的是出口编排，而不是更激进的客户端伪装。
+
+Implemented:
+
+- `src/providers/zenClient.ts`：`ZenPreparedRequest` 增加 `sessionSeed` / `maxAttempts` /
+  `banCooldownMs` / `transportCooldownMs` / `attempt` / `triedProxyIds`；新增
+  `rotateZenAttempt`（403：节点冷却 15 分钟 + 换出口 + 重铸 session）与
+  `retryZenTransport`（传输层失败或 429：冷却后换出口 + 重铸 session）；
+  `requestZenFull`、四条流式管道与 `/v1/responses` 全部接入，旧尝试用 `retried` 守卫，
+  避免失败响应的收尾逻辑误伤新的尝试。
+- `src/proxy/proxyPool.ts`：`acquire(excludeIds)` 支持排除已试节点；429 失败允许携带冷却窗口。
+- `src/config/env.ts`：新增 `FREE_TIER_RETRY_ATTEMPTS`、`FREE_TIER_BAN_COOLDOWN_MS`、
+  `FREE_TIER_TRANSPORT_COOLDOWN_MS`；熔断语义不变，只有全部尝试失败才触发。
+
+Verified:
+
+- `npm run typecheck`、`npm run build` 通过。
+- 离线单测（`_scratch/zen-probe-20261017/rotate-unit-test.mjs`）：403 轮换（含预算守卫）
+  与传输层重试均通过。
+- Windows 实例：流式 `/v1/chat/completions` 200（含 `[DONE]`）、`/v1/responses` 200
+  （`response.completed`）、禁用主出口后自动经备用出口 200。
+- WSL 实例：重建后 `/v1/chat/completions` 200（内容 `ok`）。
+- 香港实例：代码已部署、`/health` 正常；直连 IP 仍被门禁拒绝，免费层待接出口节点。
+
+Deployments:
+
+- 代码同步至 Windows（本机）、WSL `/opt/freeopencodezen`、香港 `/opt/freeopencodezen`。
+- 出口节点：Windows 挂本机 Clash（权重 10）+ WSL Clash（权重 5）；WSL 挂本机 Clash（权重 10）。

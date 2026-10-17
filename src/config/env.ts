@@ -68,6 +68,16 @@ export interface AppConfig {
   proxyMode: "direct" | "optional" | "required";
   outboundPreProxyEnabled: boolean;
   outboundPreProxyUrl: string;
+  /**
+   * Attempts per request on the anonymous fingerprint lane. A 403 FreeTierError
+   * rotates to the next egress and mints a fresh session before retrying; the
+   * shared breaker only trips when every attempt is exhausted.
+   */
+  freeTierRetryAttempts: number;
+  /** Cooldown for a proxy node that answered 403 FreeTierError. */
+  freeTierBanCooldownMs: number;
+  /** Cooldown for a proxy node that failed at the transport layer (reset/TLS). */
+  freeTierTransportCooldownMs: number;
 }
 
 export const loadConfig = (): AppConfig => ({
@@ -108,4 +118,7 @@ export const loadConfig = (): AppConfig => ({
   proxyMode: proxyModeFromEnv(),
   outboundPreProxyEnabled: boolFromEnv("OUTBOUND_PRE_PROXY_ENABLED", false),
   outboundPreProxyUrl: process.env.OUTBOUND_PRE_PROXY_URL || "",
+  freeTierRetryAttempts: Math.min(10, Math.max(1, intFromEnv("FREE_TIER_RETRY_ATTEMPTS", 3))),
+  freeTierBanCooldownMs: Math.max(60_000, intFromEnv("FREE_TIER_BAN_COOLDOWN_MS", 15 * 60 * 1000)),
+  freeTierTransportCooldownMs: Math.max(5_000, intFromEnv("FREE_TIER_TRANSPORT_COOLDOWN_MS", 60_000)),
 });

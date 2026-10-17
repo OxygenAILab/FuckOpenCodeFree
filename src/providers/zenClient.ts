@@ -112,6 +112,18 @@ export interface ZenPreparedRequest {
   upstreamModel: string;
   /** True only for the anonymous `/inference` lane, which has the fingerprint. */
   fingerprintLane: boolean;
+  /** Conversation seed the session id was minted from; a retry re-keys it. */
+  sessionSeed: string;
+  /** Attempt budget for the fingerprint lane before the shared breaker trips. */
+  maxAttempts: number;
+  /** Cooldown applied to an egress that answered 403 FreeTierError. */
+  banCooldownMs: number;
+  /** Cooldown applied to an egress that failed at the transport layer. */
+  transportCooldownMs: number;
+  /** 0 on the first attempt; incremented by `rotateZenAttempt`. */
+  attempt: number;
+  /** Proxy node ids already used, so a retry never reuses a flagged egress. */
+  triedProxyIds: string[];
 }
 
 /**
@@ -176,6 +188,12 @@ export const prepareZenRequest = (config: AppConfig, input: ZenRequestInput, pro
     publicModel: input.model,
     upstreamModel,
     fingerprintLane: config.zenRequiresFingerprint,
+    sessionSeed: input.sessionId,
+    maxAttempts: config.freeTierRetryAttempts,
+    banCooldownMs: config.freeTierBanCooldownMs,
+    transportCooldownMs: config.freeTierTransportCooldownMs,
+    attempt: 0,
+    triedProxyIds: lease?.node ? [lease.node.id] : [],
     options: {
       hostname: config.zenHost,
       port: 443,
@@ -201,6 +219,101 @@ export const prepareZenRequest = (config: AppConfig, input: ZenRequestInput, pro
       timeout: config.upstreamTimeoutMs,
     },
     lease,
+  };
+};
+
+/**
+ * Move a failed fingerprint-lane attempt onto the next egress with a fresh
+ * session id.
+ *
+ * The gate answers 403 FreeTierError when it distrusts an egress (or a
+ * session), not when the request shape is wrong. The fix is therefore
+ * rotation: bench the node that failed, mint a new session for this
+ * conversation, and retry over a different egress. Returns null when the
+ * attempt budget is spent or there is genuinely nothing new to try, which is
+ * the caller's signal to trip the shared breaker.
+ */
+export const rotateZenAttempt = (
+  prepared: ZenPreparedRequest,
+  proxyPool?: ProxyPoolStore,
+): ZenPreparedRequest | null => {
+  if (prepared.attempt + 1 >= prepared.maxAttempts) return null;
+  if (!proxyPool) return null;
+
+  if (prepared.lease?.node) {
+    proxyPool.markFailure(prepared.lease.node.id, "Upstream returned 403 FreeTierError", {
+      statusCode: 403,
+      cooldownMs: prepared.banCooldownMs,
+    });
+  }
+
+  const tried = new Set(prepared.triedProxyIds);
+  if (prepared.lease?.node) tried.add(prepared.lease.node.id);
+  const lease = proxyPool.acquire(tried);
+  if (lease.requiredUnavailable) return null;
+  // Retrying the same direct egress would only produce another 403.
+  if (!lease.node && !prepared.lease?.node) return null;
+
+  const session = mintZenId("ses", true);
+  zenSessions.set(prepared.sessionSeed, session);
+  const headers = { ...(prepared.options.headers as Record<string, string>) };
+  headers["x-opencode-session"] = session;
+  headers["x-opencode-session-id"] = session;
+  headers["x-session-affinity"] = session;
+  headers["x-session-id"] = session;
+
+  return {
+    ...prepared,
+    lease,
+    attempt: prepared.attempt + 1,
+    triedProxyIds: [...tried],
+    options: { ...prepared.options, headers, agent: lease.agent },
+  };
+};
+
+/**
+ * Retry after a transport-level failure (socket reset, TLS handshake dropped)
+ * on the fingerprint lane.
+ *
+ * A one-off reset from a shared proxy egress is ordinary and must not take the
+ * whole service down: bench that node briefly, take a different egress, mint a
+ * fresh session, and try again. Returns null when there is no other node to try
+ * or the attempt budget is spent, so the caller falls back to normal error
+ * handling.
+ */
+export const retryZenTransport = (
+  prepared: ZenPreparedRequest,
+  proxyPool: ProxyPoolStore | undefined,
+  reason: string,
+  statusCode = 502,
+): ZenPreparedRequest | null => {
+  if (prepared.attempt + 1 >= prepared.maxAttempts) return null;
+  if (!proxyPool || !prepared.lease?.node) return null;
+
+  proxyPool.markFailure(prepared.lease.node.id, reason, {
+    statusCode,
+    cooldownMs: prepared.transportCooldownMs,
+  });
+
+  const tried = new Set(prepared.triedProxyIds);
+  tried.add(prepared.lease.node.id);
+  const lease = proxyPool.acquire(tried);
+  if (!lease.node) return null;
+
+  const session = mintZenId("ses", true);
+  zenSessions.set(prepared.sessionSeed, session);
+  const headers = { ...(prepared.options.headers as Record<string, string>) };
+  headers["x-opencode-session"] = session;
+  headers["x-opencode-session-id"] = session;
+  headers["x-session-affinity"] = session;
+  headers["x-session-id"] = session;
+
+  return {
+    ...prepared,
+    lease,
+    attempt: prepared.attempt + 1,
+    triedProxyIds: [...tried],
+    options: { ...prepared.options, headers, agent: lease.agent },
   };
 };
 
@@ -315,10 +428,31 @@ export const requestZenFull = (prepared: ZenPreparedRequest, proxyPool?: ProxyPo
         if (status !== 200) {
           try {
             const parsed = JSON.parse(raw);
-            if (prepared.fingerprintLane && isFreeTierBody(status, parsed)) tripFreeTierGate(parsed?.error?.message ?? "FreeTierError");
+            if (prepared.fingerprintLane && isFreeTierBody(status, parsed)) {
+              const next = rotateZenAttempt(prepared, proxyPool);
+              if (next) {
+                resolve(requestZenFull(next, proxyPool, metrics));
+                return;
+              }
+              tripFreeTierGate(parsed?.error?.message ?? "FreeTierError");
+            } else if (prepared.fingerprintLane && status === 429) {
+              // The free tier rate-limits per egress; another node is worth a try.
+              const next = retryZenTransport(prepared, proxyPool, parsed?.error?.message ?? "FreeUsageLimitError", 429);
+              if (next) {
+                resolve(requestZenFull(next, proxyPool, metrics));
+                return;
+              }
+            }
             resolve({ status, data: parsed, raw });
           } catch {
-            if (prepared.fingerprintLane && isFreeTierBody(status, raw)) tripFreeTierGate("FreeTierError");
+            if (prepared.fingerprintLane && isFreeTierBody(status, raw)) {
+              const next = rotateZenAttempt(prepared, proxyPool);
+              if (next) {
+                resolve(requestZenFull(next, proxyPool, metrics));
+                return;
+              }
+              tripFreeTierGate("FreeTierError");
+            }
             resolve({ status, data: null, raw });
           }
           return;
@@ -346,8 +480,13 @@ export const requestZenFull = (prepared: ZenPreparedRequest, proxyPool?: ProxyPo
     });
 
     req.on("error", (error) => {
-      if (prepared.lease?.node && proxyPool) proxyPool.markFailure(prepared.lease.node.id, error.message);
       metrics?.recordUpstream({ statusCode: 502, durationMs: durationMs(), proxyId: prepared.lease?.node?.id, error: error.message });
+      const next = prepared.fingerprintLane ? retryZenTransport(prepared, proxyPool, error.message) : null;
+      if (next) {
+        resolve(requestZenFull(next, proxyPool, metrics));
+        return;
+      }
+      if (prepared.lease?.node && proxyPool) proxyPool.markFailure(prepared.lease.node.id, error.message);
       reject(error);
     });
     req.on("timeout", () => {
@@ -376,6 +515,7 @@ export const pipeZenOpenAIResponse = (prepared: ZenPreparedRequest, stream: bool
   const started = process.hrtime.bigint();
   const durationMs = () => Number(process.hrtime.bigint() - started) / 1_000_000;
   let markedFailure = false;
+  let retried = false;
   // Only the streaming path needs this: a non-streamed reply is assembled in
   // `requestZenFull`, which already substitutes the client-facing name.
   const rewriter =
@@ -399,8 +539,27 @@ export const pipeZenOpenAIResponse = (prepared: ZenPreparedRequest, stream: bool
             const parsed = JSON.parse(str);
             if (parsed.error || parsed.type === "error") {
               const errMsg = parsed.error?.message || parsed.message || "Upstream request failed";
-              if (prepared.fingerprintLane && isFreeTierBody(upstreamStatus, parsed)) tripFreeTierGate(errMsg);
-              if (prepared.lease?.node && proxyPool) {
+              if (prepared.fingerprintLane && isFreeTierBody(upstreamStatus, parsed)) {
+                const next = rotateZenAttempt(prepared, proxyPool);
+                if (next) {
+                  retried = true;
+                  markedFailure = true;
+                  zenRes.resume();
+                  pipeZenOpenAIResponse(next, stream, res, proxyPool, metrics);
+                  return;
+                }
+                tripFreeTierGate(errMsg);
+                markedFailure = true;
+              } else if (prepared.fingerprintLane && upstreamStatus === 429) {
+                const next = retryZenTransport(prepared, proxyPool, errMsg, 429);
+                if (next) {
+                  retried = true;
+                  markedFailure = true;
+                  zenRes.resume();
+                  pipeZenOpenAIResponse(next, stream, res, proxyPool, metrics);
+                  return;
+                }
+              } else if (prepared.lease?.node && proxyPool) {
                 proxyPool.markFailure(prepared.lease.node.id, errMsg, { statusCode: upstreamStatus });
                 markedFailure = true;
               }
@@ -441,6 +600,7 @@ export const pipeZenOpenAIResponse = (prepared: ZenPreparedRequest, stream: bool
         else proxyPool.markSuccess(prepared.lease.node.id);
       }
       metrics?.recordUpstream({ statusCode: zenRes.statusCode || 502, durationMs: durationMs(), proxyId: prepared.lease?.node?.id });
+      if (retried) return;
       if (!headersSent && !firstChunk) {
         if (!res.headersSent) {
           res.writeHead(502, { "Content-Type": "application/json" });
@@ -460,8 +620,20 @@ export const pipeZenOpenAIResponse = (prepared: ZenPreparedRequest, stream: bool
   });
 
   req.on("error", (error) => {
-    if (prepared.lease?.node && proxyPool && !markedFailure) proxyPool.markFailure(prepared.lease.node.id, error.message);
+    if (retried) return;
     metrics?.recordUpstream({ statusCode: 502, durationMs: durationMs(), proxyId: prepared.lease?.node?.id, error: error.message });
+    if (prepared.fingerprintLane && !res.headersSent) {
+      const next = retryZenTransport(prepared, proxyPool, error.message);
+      if (next) {
+        retried = true;
+        pipeZenOpenAIResponse(next, stream, res, proxyPool, metrics);
+        return;
+      }
+    }
+    if (prepared.lease?.node && proxyPool && !markedFailure) {
+      proxyPool.markFailure(prepared.lease.node.id, error.message);
+      markedFailure = true;
+    }
     if (!res.headersSent) {
       res.writeHead(502, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: { message: `Upstream error: ${error.message}`, type: "upstream_error" } }));
@@ -470,6 +642,7 @@ export const pipeZenOpenAIResponse = (prepared: ZenPreparedRequest, stream: bool
 
   req.on("timeout", () => {
     req.destroy();
+    if (retried) return;
     if (prepared.lease?.node && proxyPool && !markedFailure) proxyPool.markFailure(prepared.lease.node.id, "Upstream timeout");
     metrics?.recordUpstream({ statusCode: 504, durationMs: durationMs(), proxyId: prepared.lease?.node?.id, error: "Upstream timeout" });
     if (!res.headersSent) {

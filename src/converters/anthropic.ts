@@ -3,6 +3,8 @@ import type { ServerResponse } from "node:http";
 import { ocId } from "../utils/ids.js";
 import type { AnthropicMessageRequest, ZenFullResponse } from "../types/api.js";
 import type { ZenPreparedRequest } from "../providers/zenClient.js";
+import { retryZenTransport, rotateZenAttempt } from "../providers/zenClient.js";
+import { isFreeTierBody, tripFreeTierGate } from "../providers/upstreamGate.js";
 import type { ProxyPoolStore } from "../proxy/proxyPool.js";
 import type { MetricsStore } from "../observability/metrics.js";
 
@@ -159,6 +161,7 @@ export const pipeZenAsAnthropic = (prepared: ZenPreparedRequest, model: string, 
   const started = process.hrtime.bigint();
   const durationMs = () => Number(process.hrtime.bigint() - started) / 1_000_000;
   let markedFailure = false;
+  let retried = false;
   const req = https.request(prepared.options, (zenRes) => {
     let headersSent = false;
     let buffer = "";
@@ -205,7 +208,27 @@ export const pipeZenAsAnthropic = (prepared: ZenPreparedRequest, model: string, 
             const parsed = JSON.parse(trimmed);
             if (parsed.error || parsed.type === "error") {
               const errMsg = parsed.error?.message || parsed.message || "Upstream request failed";
-              if (prepared.lease?.node && proxyPool) {
+              if (prepared.fingerprintLane && isFreeTierBody(upstreamStatus, parsed)) {
+                const next = rotateZenAttempt(prepared, proxyPool);
+                if (next) {
+                  retried = true;
+                  markedFailure = true;
+                  zenRes.resume();
+                  pipeZenAsAnthropic(next, model, res, inputTokens, proxyPool, metrics);
+                  return;
+                }
+                tripFreeTierGate(errMsg);
+                markedFailure = true;
+              } else if (prepared.fingerprintLane && upstreamStatus === 429) {
+                const next = retryZenTransport(prepared, proxyPool, errMsg, 429);
+                if (next) {
+                  retried = true;
+                  markedFailure = true;
+                  zenRes.resume();
+                  pipeZenAsAnthropic(next, model, res, inputTokens, proxyPool, metrics);
+                  return;
+                }
+              } else if (prepared.lease?.node && proxyPool) {
                 proxyPool.markFailure(prepared.lease.node.id, errMsg, { statusCode: upstreamStatus });
                 markedFailure = true;
               }
@@ -289,6 +312,7 @@ export const pipeZenAsAnthropic = (prepared: ZenPreparedRequest, model: string, 
         else proxyPool.markSuccess(prepared.lease.node.id);
       }
       metrics?.recordUpstream({ statusCode: zenRes.statusCode || 502, durationMs: durationMs(), proxyId: prepared.lease?.node?.id });
+      if (retried) return;
       if (!headersSent) {
         if (!res.headersSent) {
           res.writeHead(502, { "Content-Type": "application/json" });
@@ -305,8 +329,20 @@ export const pipeZenAsAnthropic = (prepared: ZenPreparedRequest, model: string, 
   });
 
   req.on("error", (error) => {
-    if (prepared.lease?.node && proxyPool && !markedFailure) proxyPool.markFailure(prepared.lease.node.id, error.message);
+    if (retried) return;
     metrics?.recordUpstream({ statusCode: 502, durationMs: durationMs(), proxyId: prepared.lease?.node?.id, error: error.message });
+    if (prepared.fingerprintLane && !res.headersSent) {
+      const next = retryZenTransport(prepared, proxyPool, error.message);
+      if (next) {
+        retried = true;
+        pipeZenAsAnthropic(next, model, res, inputTokens, proxyPool, metrics);
+        return;
+      }
+    }
+    if (prepared.lease?.node && proxyPool && !markedFailure) {
+      proxyPool.markFailure(prepared.lease.node.id, error.message);
+      markedFailure = true;
+    }
     if (!res.headersSent) {
       res.writeHead(502, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ type: "error", error: { type: "upstream_error", message: error.message } }));
@@ -315,6 +351,7 @@ export const pipeZenAsAnthropic = (prepared: ZenPreparedRequest, model: string, 
 
   req.on("timeout", () => {
     req.destroy();
+    if (retried) return;
     if (prepared.lease?.node && proxyPool && !markedFailure) proxyPool.markFailure(prepared.lease.node.id, "Upstream timeout");
     metrics?.recordUpstream({ statusCode: 504, durationMs: durationMs(), proxyId: prepared.lease?.node?.id, error: "Upstream timeout" });
     if (!res.headersSent) {

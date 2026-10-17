@@ -289,3 +289,45 @@ echo | openssl s_client -connect 127.0.0.1:443 -servername ocz.oxygenai.top -sho
 工具调用（deepseek-v4.1-flash + shell）:
   output 里出现 {"type":"function_call","call_id":"...","name":"shell","arguments":"{...}"}
 ```
+
+## 2026-10-17 — 免费层 403 归因：出口信誉（实测）
+
+当天下午上游门禁收紧（官方 issue `anomalyco/opencode#56324` 同时复现），
+逐个用例直连探测，模型 `deepseek-v4.1-flash-free`，各一次、间隔 3 秒：
+
+| 用例 | 形态 | 路径 | 结果 |
+|---|---|---|---|
+| local-v1016 | 2 工具 + 四 session 头 + `project: global` | `/inference/v1/chat/completions` | 403 |
+| ref-majesticrise | 6 工具 + `x-opencode-request` + `prj_000…` | `/inference/openai/v1/chat/completions` | 403 |
+| ref-on-v1 | 参考仓库形态 | `/inference/v1/chat/completions` | 403 |
+| local-on-openai-v1 | 本仓库形态 | `/inference/openai/v1/chat/completions` | 403 |
+
+同一分钟内经本机 Clash 出口复测：`local-v1016` 与 `ref-majesticrise` **均 200**，
+真实 SSE、`reasoning_content` 正常。`/inference/v1/models` 在任何出口都 200，
+说明服务本身没挂——差别只在出口 IP。
+
+```
+本机经 Clash 127.0.0.1:7890 → 179.254.94.249（200）
+WSL 经其 Clash :7890        → 45.11.1.104   （200）
+香港服务器直连               → 403 FreeTierError
+```
+
+### 网关端到端（修复后）
+
+Windows 实例（`127.0.0.1:6446`）：
+
+| 测试 | 结果 |
+|---|---|
+| `POST /v1/chat/completions` 流式 | 200，含 `[DONE]` |
+| `POST /v1/responses` 流式 | 200，含 `response.completed` |
+| 禁用主出口后再请求 | 200，自动经备用出口 |
+| 出口节点计数 | 主 38 成功 / 4 失败；备 14 成功 / 0 失败 |
+
+WSL 实例（`127.0.0.1:6447`）：`POST /v1/chat/completions` 200（内容 `ok`）。
+
+香港实例：代码已更新、`/health` 正常；但其直连 IP 仍被门禁拒绝，且该机器没有
+可用代理节点，免费层暂不可用（System One / 付费 Key 通道不受此影响）。
+
+离线单测覆盖两项新原语（`_scratch/zen-probe-20261017/rotate-unit-test.mjs`）：
+403 轮换（失败节点冷却 15 分钟、换节点、重铸 session、预算守卫生效）与传输层
+重试（失败节点只冷却 60 秒、换节点、重铸 session），均通过。

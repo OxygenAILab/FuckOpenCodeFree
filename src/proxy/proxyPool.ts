@@ -120,11 +120,12 @@ export class ProxyPoolStore {
     return true;
   }
 
-  acquire(): ProxyLease {
+  acquire(excludeIds?: ReadonlySet<string>): ProxyLease {
     this.resetDailyIfNeeded();
     const now = Date.now();
     const candidates = this.proxies
       .filter((node) => node.enabled)
+      .filter((node) => !excludeIds?.has(node.id))
       .filter((node) => !node.cooldownUntil || Date.parse(node.cooldownUntil) <= now)
       .filter((node) => node.dailyRequestLimit === 0 || node.dailyRequestCount < node.dailyRequestLimit)
       .filter((node) => node.currentConcurrency < node.maxConcurrency)
@@ -169,6 +170,11 @@ export class ProxyPoolStore {
     node.lastCheckedAt = new Date().toISOString();
     if (options.statusCode === 429) {
       node.consecutiveRateLimitCount += 1;
+      // A caller that rotates away from a rate-limited node needs it benched for
+      // a short window; a plain 429 report keeps it immediately available.
+      if (options.cooldownMs !== undefined) {
+        node.cooldownUntil = new Date(Date.now() + options.cooldownMs).toISOString();
+      }
       if (node.consecutiveRateLimitCount >= 5) {
         node.enabled = false;
         node.cooldownUntil = null;

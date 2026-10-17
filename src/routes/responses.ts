@@ -6,6 +6,8 @@ import type { AppConfig } from "../config/env.js";
 import type { ModelConfigStore } from "../models/catalog.js";
 import type { SettingsStore } from "../settings/settingsStore.js";
 import { prepareZenRequest, requestZenFull, type ZenPreparedRequest } from "../providers/zenClient.js";
+import { retryZenTransport, rotateZenAttempt } from "../providers/zenClient.js";
+import { isFreeTierBody, tripFreeTierGate } from "../providers/upstreamGate.js";
 import { SessionStore, sessionScopeFromHeaders } from "../sessions/sessionStore.js";
 import type { ProxyPoolStore } from "../proxy/proxyPool.js";
 import type { AsyncLimiter } from "../rateLimit/limiter.js";
@@ -325,8 +327,13 @@ const pipeResponses = (
     parallel_tool_calls: true,
   });
   const responseId = newId("resp");
-  emit("response.created", { response: { ...base(), id: responseId } });
-  emit("response.in_progress", { response: { ...base(), id: responseId } });
+  let initialEventsSent = false;
+  const start = () => {
+    if (initialEventsSent) return;
+    initialEventsSent = true;
+    emit("response.created", { response: { ...base(), id: responseId } });
+    emit("response.in_progress", { response: { ...base(), id: responseId } });
+  };
 
   const openMessage = () => {
     if (messageOpen) return;
@@ -428,6 +435,7 @@ const pipeResponses = (
   const finish = (failed?: string) => {
     if (finished) return;
     finished = true;
+    start();
     if (prepared.lease?.node && proxyPool) {
       if (failed) proxyPool.markFailure(prepared.lease.node.id, failed, { statusCode: upstreamStatus || 502 });
       else proxyPool.markSuccess(prepared.lease.node.id);
@@ -484,6 +492,7 @@ const pipeResponses = (
     res.end();
   };
 
+  let retried = false;
   const request = https.request(prepared.options, (zenRes) => {
     const status = zenRes.statusCode || 502;
     upstreamStatus = status;
@@ -491,17 +500,36 @@ const pipeResponses = (
       const chunks: Buffer[] = [];
       zenRes.on("data", (chunk: Buffer) => chunks.push(chunk));
       zenRes.on("end", () => {
+        const raw = Buffer.concat(chunks).toString();
         let message = `Upstream returned ${status}`;
+        let parsed: any = null;
         try {
-          const parsed = JSON.parse(Buffer.concat(chunks).toString());
+          parsed = JSON.parse(raw);
           message = parsed?.error?.message || parsed?.message || message;
         } catch {
           // Keep the status-based message.
+        }
+        if (prepared.fingerprintLane && isFreeTierBody(status, parsed ?? raw)) {
+          const next = rotateZenAttempt(prepared, proxyPool);
+          if (next) {
+            retried = true;
+            pipeResponses(next, model, res, metrics, proxyPool);
+            return;
+          }
+          tripFreeTierGate(message);
+        } else if (prepared.fingerprintLane && status === 429) {
+          const next = retryZenTransport(prepared, proxyPool, message, 429);
+          if (next) {
+            retried = true;
+            pipeResponses(next, model, res, metrics, proxyPool);
+            return;
+          }
         }
         finish(message);
       });
       return;
     }
+    start();
     zenRes.on("data", (chunk: Buffer) => {
       headersSent = true;
       buffer += decoder.write(chunk);
@@ -532,11 +560,27 @@ const pipeResponses = (
       }
       finish();
     });
-    zenRes.on("error", (error) => finish(error.message));
+    zenRes.on("error", (error) => {
+      if (retried) return;
+      finish(error.message);
+    });
   });
-  request.on("error", (error) => finish(error.message));
+  request.on("error", (error) => {
+    if (retried) return;
+    metrics?.recordUpstream({ statusCode: 502, durationMs: durationMs(), proxyId: prepared.lease?.node?.id, error: error.message });
+    if (prepared.fingerprintLane && !res.headersSent) {
+      const next = retryZenTransport(prepared, proxyPool, error.message);
+      if (next) {
+        retried = true;
+        pipeResponses(next, model, res, metrics, proxyPool);
+        return;
+      }
+    }
+    finish(error.message);
+  });
   request.on("timeout", () => {
     request.destroy();
+    if (retried) return;
     finish("Upstream timeout");
   });
   res.on("close", () => {

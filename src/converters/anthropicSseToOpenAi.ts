@@ -2,6 +2,8 @@ import https from "node:https";
 import type { ServerResponse } from "node:http";
 import { ocId } from "../utils/ids.js";
 import type { ZenPreparedRequest } from "../providers/zenClient.js";
+import { retryZenTransport, rotateZenAttempt } from "../providers/zenClient.js";
+import { isFreeTierBody, tripFreeTierGate } from "../providers/upstreamGate.js";
 import type { ProxyPoolStore } from "../proxy/proxyPool.js";
 import type { MetricsStore } from "../observability/metrics.js";
 
@@ -197,6 +199,7 @@ export const pipeAnthropicSseAsOpenAI = (
   let buffer = "";
   let markedFailure = false;
   let receivedData = false;
+  let retried = false;
 
   const req = https.request(prepared.options, (zenRes) => {
     zenRes.on("data", (chunk: Buffer) => {
@@ -206,9 +209,34 @@ export const pipeAnthropicSseAsOpenAI = (
       if (!res.headersSent && isPlainJson(buffer)) {
         try {
           const parsed = JSON.parse(buffer);
-          if (parsed.error || parsed.type === "error" || zenRes.statusCode && zenRes.statusCode >= 400) {
+          if (parsed.error || parsed.type === "error" || (zenRes.statusCode && zenRes.statusCode >= 400)) {
+            const status = zenRes.statusCode || 502;
             const message = parsed.error?.message || parsed.message || "Upstream error";
-            writeOpenAiError(res, zenRes.statusCode || 502, message);
+            if (prepared.fingerprintLane && isFreeTierBody(status, parsed)) {
+              const next = rotateZenAttempt(prepared, proxyPool);
+              if (next) {
+                retried = true;
+                markedFailure = true;
+                zenRes.resume();
+                pipeAnthropicSseAsOpenAI(next, model, res, proxyPool, metrics);
+                return;
+              }
+              tripFreeTierGate(message);
+              markedFailure = true;
+            } else if (prepared.fingerprintLane && status === 429) {
+              const next = retryZenTransport(prepared, proxyPool, message, 429);
+              if (next) {
+                retried = true;
+                markedFailure = true;
+                zenRes.resume();
+                pipeAnthropicSseAsOpenAI(next, model, res, proxyPool, metrics);
+                return;
+              }
+            } else if (prepared.lease?.node && proxyPool && !markedFailure) {
+              proxyPool.markFailure(prepared.lease.node.id, message, { statusCode: status });
+              markedFailure = true;
+            }
+            writeOpenAiError(res, status, message);
             zenRes.resume();
             return;
           }
@@ -241,6 +269,7 @@ export const pipeAnthropicSseAsOpenAI = (
       }
       metrics?.recordUpstream({ statusCode: zenRes.statusCode || 502, durationMs: durationMs(), proxyId: prepared.lease?.node?.id });
 
+      if (retried) return;
       if (!receivedData && !res.headersSent) {
         writeOpenAiError(res, 502, "Empty response from upstream");
         return;
@@ -255,11 +284,20 @@ export const pipeAnthropicSseAsOpenAI = (
   });
 
   req.on("error", (error) => {
+    if (retried) return;
+    metrics?.recordUpstream({ statusCode: 502, durationMs: durationMs(), proxyId: prepared.lease?.node?.id, error: error.message });
+    if (prepared.fingerprintLane && !res.headersSent) {
+      const next = retryZenTransport(prepared, proxyPool, error.message);
+      if (next) {
+        retried = true;
+        pipeAnthropicSseAsOpenAI(next, model, res, proxyPool, metrics);
+        return;
+      }
+    }
     if (prepared.lease?.node && proxyPool && !markedFailure) {
       proxyPool.markFailure(prepared.lease.node.id, error.message);
       markedFailure = true;
     }
-    metrics?.recordUpstream({ statusCode: 502, durationMs: durationMs(), proxyId: prepared.lease?.node?.id, error: error.message });
     if (!res.headersSent) {
       writeOpenAiError(res, 502, `Upstream error: ${error.message}`);
     } else if (!res.writableEnded) {
@@ -269,6 +307,7 @@ export const pipeAnthropicSseAsOpenAI = (
 
   req.on("timeout", () => {
     req.destroy();
+    if (retried) return;
     if (prepared.lease?.node && proxyPool && !markedFailure) {
       proxyPool.markFailure(prepared.lease.node.id, "Upstream timeout");
       markedFailure = true;

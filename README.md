@@ -46,6 +46,8 @@ OpenCodeProxyHub 默认内置以下免费模型，均可通过 OpenAI 兼容接�
 
 > **上游指纹门（2026-10-11 起）**：免费层已从 `/zen/v1` 迁到 `/inference/v1`，旧路径对匿名请求一律返回 `403 FreeTierError`。网关按实测通过条件构造请求：走 `/inference/v1`；强制 `stream: true`（非流式客户端由网关把 SSE 折叠成单个 JSON 响应）；请求体必须带 `bash` 与 `read` 两个工具（按小写名精确匹配，各自带真实参数 schema，缺失即 403，网关会自动补齐占位工具）；四个 session 头 `x-opencode-session`、`x-opencode-session-id`、`x-session-affinity`、`x-session-id` 必须同值；`x-opencode-project` 只能是字面量 `global`；**不发** `x-opencode-request` 与 `HTTP-Referer`；session id 前 12 位 hex 必须是取反后的时间戳（`ses_` 降序），纯随机或摘要派生即拒。上游错误现在按真实状态码透传（403 不再被改写成 429）。
 
+> **出口信誉与轮换（2026-10-17）**：门禁判定的是**出口 IP**，不是请求形态——同一份请求在大陆直连是 403、经普通代理出口则是 200。网关因此在指纹通道上做出口轮换：403 `FreeTierError` 把该节点冷却 15 分钟后换出口并用新 session 重试；传输层失败（TLS 重置/断连）只冷却 60 秒后换出口重试；429 短暂冷却后换出口重试；全部尝试失败才触发共享熔断。尝试次数与冷却分别由 `FREE_TIER_RETRY_ATTEMPTS`、`FREE_TIER_BAN_COOLDOWN_MS`、`FREE_TIER_TRANSPORT_COOLDOWN_MS`、`FREE_TIER_GATE_COOLDOWN_MS` 控制；没有配置任何出口节点时行为回退到"直连 → 403 → 熔断"。经过验证的部署方式：每个实例在代理池里挂一个可用的本地/远端代理节点即可恢复免费层。
+
 新部署会自动生成以上默认模型；已有部署升级后，缺失的默认免费模型会自动追加到已有 `models.json`，不会覆盖用户已修改的模型配置。带旧 `-free` 后缀的条目会在升级时自动禁用并标注 `(retired: Renamed to …)`；上游已下线的模型（如 `mimo-v2.5-free`、`ling-3.0-flash-fin-free`、`laguna-s-2.1-free`、`deepseek-v4-flash-free`、`hy3-free`、`x-preview-f-free`、`north-mini-code-free`、`longcat-2.0-free`）同样会自动禁用并标记原因，用户无需手动清理。此前被自动禁用的模型若重新上线，升级后会仅恢复带下线标注的条目自动重新启用；用户手动关闭的不受影响。
 
 ## 部署方式
@@ -351,6 +353,10 @@ GLOBAL_REQUESTS_PER_MINUTE=120          # 全局每分钟请求上限
 API_KEY_REQUESTS_PER_MINUTE=60          # 单 Key 每分钟请求上限
 API_KEY_MAX_CONCURRENT_REQUESTS=10      # 单 Key 并发请求上限
 API_KEY_MAX_CONCURRENT_STREAMS=5        # 单 Key 并发流上限
+FREE_TIER_RETRY_ATTEMPTS=3              # 指纹通道每次请求的最大出口尝试次数
+FREE_TIER_BAN_COOLDOWN_MS=900000        # 出口被判 403 后的冷却（毫秒）
+FREE_TIER_TRANSPORT_COOLDOWN_MS=60000   # 出口传输层失败后的冷却（毫秒）
+FREE_TIER_GATE_COOLDOWN_MS=60000        # 全部尝试失败后的共享熔断窗口（毫秒）
 REDIS_URL=                              # 留空=内存限流；填写=Redis 分布式限流
 REDIS_KEY_PREFIX=opencode-proxy-hub:limit
 SHUTDOWN_DRAIN_TIMEOUT_MS=30000         # 优雅停机排空超时
