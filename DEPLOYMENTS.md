@@ -12,6 +12,7 @@ read them on the host.
 | Service | `systemctl status freeopencodezen` (systemd, `Restart=always`) |
 | Listens | `127.0.0.1:6446` |
 | Ingress | OpenResty (1Panel) site `ocz.oxygenai.top`, config `/opt/1panel/www/conf.d/ocz.oxygenai.top.conf`, proxied through Cloudflare |
+| Origin TLS | Let's Encrypt (ECDSA, `acme.sh` webroot), SAN `ocz.oxygenai.top` + `free.ocz.oxygenai.top`, auto-renewed by the root crontab |
 | Surface | `API_SURFACE=all` — OpenAI, Anthropic and System One |
 | Log | `/var/log/freeopencodezen.log` |
 
@@ -83,3 +84,25 @@ wildcard (`*.oxygenai.top`) covers it. A two-level name such as
 `free.ocz.oxygenai.top` resolves but fails the TLS handshake at the Cloudflare
 edge — that needs an Advanced Certificate or Cloudflare for SaaS, so the gateway
 is published on the one-level name instead.
+
+The **origin** does serve both names with a valid Let's Encrypt chain, so the
+grey-cloud (DNS-only) route is available if someone wants `free.ocz` too:
+
+1. In Cloudflare, set the `free.ocz.oxygenai.top` record to **DNS only**.
+2. Done — the origin certificate already covers that name.
+
+Otherwise the edge needs Total TLS, an Advanced Certificate, or Cloudflare for
+SaaS, none of which are reachable without dashboard access.
+
+### Renewal
+
+`acme.sh` installed a root crontab entry (`acme.sh --cron`) and the install hooks
+reload OpenResty via `docker exec 1Panel-openresty-RXS6 openresty -s reload`, so
+renewal is hands-off. Verify with:
+
+```bash
+openssl x509 -in /opt/1panel/www/sites/ocz.oxygenai.top/ssl/fullchain.pem \
+  -noout -subject -issuer -dates -ext subjectAltName
+echo | openssl s_client -connect 127.0.0.1:443 -servername ocz.oxygenai.top -showcerts 2>/dev/null \
+  | grep -E "^ *[0-9]+ s:"
+```

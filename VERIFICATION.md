@@ -249,6 +249,26 @@ POST https://ocz.oxygenai.top/v1/chat/completions (stream) 7 个 SSE chunk，模
 通配符只覆盖 `*.oxygenai.top` 一层，二级子域需要 Advanced Certificate。因此对外名用
 `ocz.oxygenai.top`。
 
+源站侧两个名字都已换成 **Let's Encrypt 证书**（ECDSA，SAN 含 `ocz.oxygenai.top` 与
+`free.ocz.oxygenai.top`），实测链路完整：
+
+```
+echo | openssl s_client -connect 127.0.0.1:443 -servername ocz.oxygenai.top -showcerts
+  0 s:CN = ocz.oxygenai.top
+  1 s:C = US, O = Let's Encrypt, CN = YE1
+  2 s:C = US, O = ISRG, CN = Root YE
+  3 s:C = US, O = Internet Security Research Group, CN = ISRG Root X2
+
+公网: https://ocz.oxygenai.top/health -> 200  curl tls_verify_result=0
+```
+
+`acme.sh` 已写入 root crontab 自动续期，install 钩子会 `openresty -s reload`。
+这意味着 CloudFlare 即便切到 **Full (strict)** 也不会断。
+
+若要让 `free.ocz.oxygenai.top` 也对外可用，只需在 CloudFlare 把该记录设为
+**DNS only（灰云）**——源站证书已经覆盖这个名字，无需再申请证书。若要保持橙云，
+则需要 Total TLS / Advanced Certificate / Cloudflare for SaaS，这三者都需要面板权限。
+
 ### Responses 端点验证
 
 上游对 `/inference/v1/responses` 一律回 `ModelProtocolUnsupported`，所以该协议在网关内转换：
