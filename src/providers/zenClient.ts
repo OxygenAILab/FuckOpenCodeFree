@@ -3,6 +3,7 @@ import type { ServerResponse } from "node:http";
 import { StringDecoder } from "node:string_decoder";
 import { mintZenId } from "../utils/ids.js";
 import { resolveUpstreamModel } from "../models/naming.js";
+import { freeTierGateResponse, freeTierGateState, isFreeTierBody, tripFreeTierGate } from "./upstreamGate.js";
 import type { AppConfig } from "../config/env.js";
 import type { ZenFullResponse } from "../types/api.js";
 import type { ProxyLease, ProxyPoolStore } from "../proxy/proxyPool.js";
@@ -282,6 +283,12 @@ export const requestZenFull = (prepared: ZenPreparedRequest, proxyPool?: ProxyPo
       reject(new Error(noProxyAvailableError));
       return;
     }
+    // While the upstream gate is up, answer locally instead of spending another
+    // round trip that a downstream fallback may bill against.
+    if (freeTierGateState().tripped) {
+      resolve({ status: 503, data: freeTierGateResponse().body, raw: "" });
+      return;
+    }
     const started = process.hrtime.bigint();
     const durationMs = () => Number(process.hrtime.bigint() - started) / 1_000_000;
     const req = https.request(prepared.options, (zenRes) => {
@@ -297,8 +304,11 @@ export const requestZenFull = (prepared: ZenPreparedRequest, proxyPool?: ProxyPo
         const status = zenRes.statusCode || 502;
         if (status !== 200) {
           try {
-            resolve({ status, data: JSON.parse(raw), raw });
+            const parsed = JSON.parse(raw);
+            if (isFreeTierBody(status, parsed)) tripFreeTierGate(parsed?.error?.message ?? "FreeTierError");
+            resolve({ status, data: parsed, raw });
           } catch {
+            if (isFreeTierBody(status, raw)) tripFreeTierGate("FreeTierError");
             resolve({ status, data: null, raw });
           }
           return;
@@ -347,6 +357,12 @@ export const pipeZenOpenAIResponse = (prepared: ZenPreparedRequest, stream: bool
     res.end(JSON.stringify({ error: { message: noProxyAvailableError, type: "proxy_unavailable" } }));
     return;
   }
+  if (freeTierGateState().tripped) {
+    const gate = freeTierGateResponse();
+    res.writeHead(503, { "Content-Type": "application/json", "Retry-After": String(gate.retryAfterSeconds) });
+    res.end(JSON.stringify(gate.body));
+    return;
+  }
   const started = process.hrtime.bigint();
   const durationMs = () => Number(process.hrtime.bigint() - started) / 1_000_000;
   let markedFailure = false;
@@ -373,6 +389,7 @@ export const pipeZenOpenAIResponse = (prepared: ZenPreparedRequest, stream: bool
             const parsed = JSON.parse(str);
             if (parsed.error || parsed.type === "error") {
               const errMsg = parsed.error?.message || parsed.message || "Upstream request failed";
+              if (isFreeTierBody(upstreamStatus, parsed)) tripFreeTierGate(errMsg);
               if (prepared.lease?.node && proxyPool) {
                 proxyPool.markFailure(prepared.lease.node.id, errMsg, { statusCode: upstreamStatus });
                 markedFailure = true;
