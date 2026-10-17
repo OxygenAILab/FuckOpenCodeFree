@@ -49,6 +49,19 @@ export interface AppConfig {
    * (`/zen/v1`, `/zen/go/v1`) authenticate by key and take the caller's shape.
    */
   zenRequiresFingerprint: boolean;
+  /**
+   * User-Agent presented to upstream. Defaults to the exact string the shipped
+   * v1.19.3 CLI sends: `opencode/<ver> ai-sdk/provider-utils/<ver> runtime/bun/<ver>`
+   * (extracted statically in OpenCode-REA-2026-10-17/06-free-tier-fingerprint.zh.md).
+   */
+  zenOpencodeUa: string;
+  /**
+   * Also send `x-session-affinity` / `x-session-id` on the fingerprint lane.
+   * The real CLI sends those two only for non-OpenCode providers; the gateway
+   * carried them from the 2026-10-16 shape, so the toggle keeps that behaviour
+   * available without a code change.
+   */
+  zenLegacySessionHeaders: boolean;
   /** TypeSafe System One (`jev-*`) path; those models are not chat models. */
   zenSystemOnePath: string;
   /**
@@ -102,6 +115,9 @@ export const loadConfig = (): AppConfig => ({
   // ids included; only the Go catalogue uses bare ids.
   zenFreeNaming: !(process.env.ZEN_PATH || "/inference/v1/chat/completions").includes("/zen/go/"),
   zenRequiresFingerprint: (process.env.ZEN_PATH || "/inference/v1/chat/completions").includes("/inference/"),
+  zenOpencodeUa:
+    process.env.ZEN_OPENCODE_UA || "opencode/1.19.3 ai-sdk/provider-utils/4.0.45 runtime/bun/1.3.14",
+  zenLegacySessionHeaders: boolFromEnv("ZEN_LEGACY_SESSION_HEADERS", false),
   // TypeSafe's System One decision models (`jev-*`) answer on a sibling path
   // with their own request shape; they are not chat models.
   zenSystemOnePath: process.env.ZEN_SYSTEMONE_PATH || "/inference/v1/systemone",

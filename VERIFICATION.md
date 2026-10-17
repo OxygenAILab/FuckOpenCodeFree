@@ -331,3 +331,25 @@ WSL 实例（`127.0.0.1:6447`）：`POST /v1/chat/completions` 200（内容 `ok`
 离线单测覆盖两项新原语（`_scratch/zen-probe-20261017/rotate-unit-test.mjs`）：
 403 轮换（失败节点冷却 15 分钟、换节点、重铸 session、预算守卫生效）与传输层
 重试（失败节点只冷却 60 秒、换节点、重铸 session），均通过。
+
+### 官方指纹校准（2026-10-17，REA 静态提取）
+
+对官方 v1.19.3 Linux x64 产物的 `.bun` 段做静态提取，证据在
+`02-Research/OpenCode-REA-2026-10-17/06-free-tier-fingerprint.zh.md`：请求头构造
+（偏移 `0x2ffb90`）、`Ji = opencode/${version}`（`0x2ff174`）、
+`OPENCODE_CLIENT ?? "cli"`（`0xba4d42`）、id 铸造（`0xb33a4c`）、产物内置
+Bun `1.3.14`。据此把网关指纹通道校准为官方形态，离线单测断言：
+
+| 断言 | 结果 |
+|---|---|
+| UA 等于 `opencode/1.19.3 ai-sdk/provider-utils/4.0.45 runtime/bun/1.3.14` | PASS |
+| `x-opencode-client: cli` | PASS |
+| `x-opencode-project: global` | PASS |
+| `x-opencode-session-id` 与 `x-opencode-session` 同值 | PASS |
+| `x-opencode-request` 形如 `msg_` + 12 hex + 14 base62 | PASS |
+| 默认不发送 `x-session-affinity` / `x-session-id`（官方只给非 OpenCode provider 发） | PASS |
+| `ZEN_LEGACY_SESSION_HEADERS=1` 时两个别名头同值恢复 | PASS |
+| 403 轮换后 session 头成对更新，`x-opencode-request` 保持不变 | PASS |
+
+校准后三处部署复测：Windows 实例流式 `200`（含 `[DONE]`）、WSL 实例 `200`
+（内容 `ok`）；香港实例健康正常但仍因出口 IP 被门禁拒绝。

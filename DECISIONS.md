@@ -82,3 +82,33 @@ UA 版本同理保持现状。上一节"不做客户端伪装"的结论不变：
 **当前出口拓扑**：Windows 实例挂两个节点（本机 Clash `127.0.0.1:7890` 权重 10、
 WSL Clash 权重 5）；WSL 实例挂本机 Clash；香港实例仍未接出口节点，其直连 IP 被
 门禁判定，所以 `ocz.oxygenai.top` 的免费层仍不可用，需要一个非受限出口才能恢复。
+
+## 2026-10-17 — 用 REA 从官方产物取指纹，按官方客户端头集模拟环境
+
+**背景**：10-16 的头部契约是黑盒试探出来的（"四个 session 头同值"、"不发
+`x-opencode-request`"）。当天的门禁收紧让这套猜测失去解释力，于是不再猜：直接分析
+官方产物 `OpenCode-REA-2026-10-17`（Bun 单文件发布，`.bun` 段是可读 ESM），新增
+第 6 篇给出请求头、UA 组成与 id 铸造原码。
+
+**官方形态**（`providerID` 以 `opencode` 开头时）：
+
+```
+User-Agent: opencode/<CLI 版本> ai-sdk/provider-utils/4.0.45 runtime/bun/1.3.14
+x-opencode-session-id / x-opencode-session: 同值（ses_ 降序 id）
+x-opencode-project: git 首个提交 hash；无仓库时字面量 global
+x-opencode-request: 该轮用户消息 id（msg_ 升序）
+x-opencode-client: OPENCODE_CLIENT ?? "cli"
+```
+
+`x-session-affinity` / `X-Session-Id` 只在**非** OpenCode provider 分支发送。
+
+**决定**：指纹通道改为发送上述官方头集与官方 UA；`x-opencode-request` 每请求铸一个
+`msg_` id，并在重试之间保持不变；两个别名头默认不再发送，需要旧行为时开
+`ZEN_LEGACY_SESSION_HEADERS=1`。project 仍用 `global`——网关没有客户端仓库上下文，
+而 `global` 是官方 `Project.ID` 的一等取值。
+
+**保留的两处偏离（有实测依据）**：
+
+1. tools 仍只注入 `bash` + `read` 占位。官方发送的是当前 agent 的工具集，网关无从
+   得知；注入全套占位会诱导模型误调工具，而 10-16 实测该注入足以过门禁。
+2. 不发 `x-opencode-parent-session-id`（网关没有子会话概念）。

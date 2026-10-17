@@ -1486,3 +1486,29 @@ Deployments:
 
 - 代码同步至 Windows（本机）、WSL `/opt/freeopencodezen`、香港 `/opt/freeopencodezen`。
 - 出口节点：Windows 挂本机 Clash（权重 10）+ WSL Clash（权重 5）；WSL 挂本机 Clash（权重 10）。
+
+## 2026-10-17 — 按官方产物校准免费层指纹（REA）
+
+Context:
+
+- 10-16 的头部契约来自黑盒试探；当日门禁收紧后不再猜，改为直接静态提取官方产物
+  （`OpenCode-REA-2026-10-17/06-free-tier-fingerprint.zh.md`）。
+
+Implemented:
+
+- `src/providers/zenClient.ts`：指纹通道请求头改为官方客户端对 `opencode/*` provider
+  发送的那一组 —— `x-opencode-session-id` + `x-opencode-session`（同值）、
+  `x-opencode-project: global`、`x-opencode-request`（每请求 `msg_` 升序 id）、
+  `x-opencode-client: cli`，UA 取自 `ZEN_OPENCODE_UA`（默认
+  `opencode/1.19.3 ai-sdk/provider-utils/4.0.45 runtime/bun/1.3.14`）。
+- 新增 `applyZenSessionHeaders()`：轮换/重试只改这两个官方 session 头；若开启
+  `ZEN_LEGACY_SESSION_HEADERS=1` 则同时维护 `x-session-affinity` / `x-session-id`。
+- `src/config/env.ts`：新增 `zenOpencodeUa` 与 `zenLegacySessionHeaders`。
+
+Verified:
+
+- `npm run typecheck`、`npm run build` 通过。
+- 离线单测新增 8 项头保真断言（UA、client、project、session 头成对、`msg_` 形状、
+  默认不发别名头、legacy 开关、重试后请求 id 不变），全部通过。
+- Windows 实例流式 `200`（含 `[DONE]`）；WSL 实例 `200`（内容 `ok`）；两处均用同一个
+  v4 构建包更新。

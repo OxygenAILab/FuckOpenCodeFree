@@ -9,8 +9,24 @@ import type { ZenFullResponse } from "../types/api.js";
 import type { ProxyLease, ProxyPoolStore } from "../proxy/proxyPool.js";
 import type { MetricsStore } from "../observability/metrics.js";
 
-const OC_VERSION = "1.18.31";
 const noProxyAvailableError = "Proxy is required but no proxy node is available";
+
+/**
+ * Point the session headers at `session`.
+ *
+ * The shipped CLI sends `x-opencode-session-id` and `x-opencode-session` for
+ * OpenCode providers, and `x-session-affinity` / `X-Session-Id` only for other
+ * providers. The gateway used to send all four; `config.zenLegacySessionHeaders`
+ * keeps that available, so only the aliases already present are rewritten.
+ */
+const applyZenSessionHeaders = (headers: Record<string, string>, session: string): void => {
+  headers["x-opencode-session"] = session;
+  headers["x-opencode-session-id"] = session;
+  if ("x-session-affinity" in headers || "x-session-id" in headers) {
+    headers["x-session-affinity"] = session;
+    headers["x-session-id"] = session;
+  }
+};
 
 /**
  * Translate an upstream error body into an OpenAI-shaped error without losing
@@ -181,8 +197,29 @@ export const prepareZenRequest = (config: AppConfig, input: ZenRequestInput, pro
 
   const body = JSON.stringify(requestBody);
   const session = zenSessionId(input.sessionId);
+  // The CLI sends the id of the user message that opened this turn; the gateway
+  // has no message ids, so one ascending `msg_` id is minted per request and
+  // kept stable across retries of the same turn.
+  const requestId = mintZenId("msg", false);
 
   const lease = proxyPool?.acquire();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "Content-Length": String(Buffer.byteLength(body)),
+    Authorization: `Bearer ${config.zenApiKey}`,
+    "User-Agent": config.zenOpencodeUa,
+    "x-opencode-client": "cli",
+    "x-opencode-project": "global",
+    "x-opencode-session-id": session,
+    "x-opencode-session": session,
+    "x-opencode-request": requestId,
+    // Deliberately absent: `HTTP-Referer` (and the two affinity aliases above,
+    // unless the legacy toggle is on) — the real CLI does not send them here.
+  };
+  if (config.zenLegacySessionHeaders) {
+    headers["x-session-affinity"] = session;
+    headers["x-session-id"] = session;
+  }
   return {
     body,
     publicModel: input.model,
@@ -199,22 +236,7 @@ export const prepareZenRequest = (config: AppConfig, input: ZenRequestInput, pro
       port: 443,
       path: config.zenPath,
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Content-Length": Buffer.byteLength(body),
-        Authorization: `Bearer ${config.zenApiKey}`,
-        "User-Agent": `opencode/${OC_VERSION} ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.13`,
-        "x-opencode-client": "cli",
-        "x-opencode-project": "global",
-        // The gate wants all four session headers carrying the same value;
-        // sending only the legacy `x-opencode-session` is refused.
-        "x-opencode-session": session,
-        "x-opencode-session-id": session,
-        "x-session-affinity": session,
-        "x-session-id": session,
-        // Deliberately absent: `x-opencode-request` and `HTTP-Referer`. Their
-        // presence alone trips the gate on the inference path.
-      },
+      headers,
       ...(lease?.agent ? { agent: lease.agent } : {}),
       timeout: config.upstreamTimeoutMs,
     },
@@ -257,10 +279,7 @@ export const rotateZenAttempt = (
   const session = mintZenId("ses", true);
   zenSessions.set(prepared.sessionSeed, session);
   const headers = { ...(prepared.options.headers as Record<string, string>) };
-  headers["x-opencode-session"] = session;
-  headers["x-opencode-session-id"] = session;
-  headers["x-session-affinity"] = session;
-  headers["x-session-id"] = session;
+  applyZenSessionHeaders(headers, session);
 
   return {
     ...prepared,
@@ -303,10 +322,7 @@ export const retryZenTransport = (
   const session = mintZenId("ses", true);
   zenSessions.set(prepared.sessionSeed, session);
   const headers = { ...(prepared.options.headers as Record<string, string>) };
-  headers["x-opencode-session"] = session;
-  headers["x-opencode-session-id"] = session;
-  headers["x-session-affinity"] = session;
-  headers["x-session-id"] = session;
+  applyZenSessionHeaders(headers, session);
 
   return {
     ...prepared,
