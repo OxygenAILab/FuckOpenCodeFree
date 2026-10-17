@@ -110,6 +110,8 @@ export interface ZenPreparedRequest {
   publicModel: string;
   /** The upstream model name actually sent in the body. */
   upstreamModel: string;
+  /** True only for the anonymous `/inference` lane, which has the fingerprint. */
+  fingerprintLane: boolean;
 }
 
 /**
@@ -143,16 +145,23 @@ const createModelRewriter = (upstreamModel: string, publicModel: string) => {
 export const prepareZenRequest = (config: AppConfig, input: ZenRequestInput, proxyPool?: ProxyPoolStore): ZenPreparedRequest => {
   // Client-facing names drop the upstream `-free` suffix; the upstream id is
   // restored here so the traffic is byte-identical to the suffixed names.
-  const upstreamModel = resolveUpstreamModel(input.model);
-  // The gate requires `stream: true`: an otherwise byte-identical body flips
-  // 200 -> 403 the moment it asks for a non-streamed completion. Callers that
-  // want a single JSON object get one assembled from the SSE stream instead.
+  // Free-tier ids carry `-free` upstream; the subscription route uses the bare
+  // ids. `config.zenFreeNaming` follows `ZEN_PATH` so one switch flips both.
+  const upstreamModel = config.zenFreeNaming ? resolveUpstreamModel(input.model) : input.model;
+  // The anonymous lane's fingerprint requires `stream: true`: an otherwise
+  // byte-identical body flips 200 -> 403 the moment it asks for a non-streamed
+  // completion. The credential lanes authenticate by key, so the caller's own
+  // shape is passed through untouched.
   const requestBody: Record<string, unknown> = {
     model: upstreamModel,
     messages: input.messages,
-    stream: true,
+    stream: config.zenRequiresFingerprint ? true : Boolean(input.stream),
   };
-  requestBody.tools = ensureZenTools(input.tools);
+  if (config.zenRequiresFingerprint) {
+    requestBody.tools = ensureZenTools(input.tools);
+  } else if (Array.isArray(input.tools) && input.tools.length > 0) {
+    requestBody.tools = input.tools;
+  }
   if (input.toolChoice) requestBody.tool_choice = input.toolChoice;
   for (const [key, value] of Object.entries(input.parameters || {})) {
     if (value !== undefined) requestBody[key] = value;
@@ -166,6 +175,7 @@ export const prepareZenRequest = (config: AppConfig, input: ZenRequestInput, pro
     body,
     publicModel: input.model,
     upstreamModel,
+    fingerprintLane: config.zenRequiresFingerprint,
     options: {
       hostname: config.zenHost,
       port: 443,
@@ -174,7 +184,7 @@ export const prepareZenRequest = (config: AppConfig, input: ZenRequestInput, pro
       headers: {
         "Content-Type": "application/json",
         "Content-Length": Buffer.byteLength(body),
-        Authorization: "Bearer public",
+        Authorization: `Bearer ${config.zenApiKey}`,
         "User-Agent": `opencode/${OC_VERSION} ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.13`,
         "x-opencode-client": "cli",
         "x-opencode-project": "global",
@@ -285,7 +295,7 @@ export const requestZenFull = (prepared: ZenPreparedRequest, proxyPool?: ProxyPo
     }
     // While the upstream gate is up, answer locally instead of spending another
     // round trip that a downstream fallback may bill against.
-    if (freeTierGateState().tripped) {
+    if (prepared.fingerprintLane && freeTierGateState().tripped) {
       resolve({ status: 503, data: freeTierGateResponse().body, raw: "" });
       return;
     }
@@ -305,10 +315,10 @@ export const requestZenFull = (prepared: ZenPreparedRequest, proxyPool?: ProxyPo
         if (status !== 200) {
           try {
             const parsed = JSON.parse(raw);
-            if (isFreeTierBody(status, parsed)) tripFreeTierGate(parsed?.error?.message ?? "FreeTierError");
+            if (prepared.fingerprintLane && isFreeTierBody(status, parsed)) tripFreeTierGate(parsed?.error?.message ?? "FreeTierError");
             resolve({ status, data: parsed, raw });
           } catch {
-            if (isFreeTierBody(status, raw)) tripFreeTierGate("FreeTierError");
+            if (prepared.fingerprintLane && isFreeTierBody(status, raw)) tripFreeTierGate("FreeTierError");
             resolve({ status, data: null, raw });
           }
           return;
@@ -357,7 +367,7 @@ export const pipeZenOpenAIResponse = (prepared: ZenPreparedRequest, stream: bool
     res.end(JSON.stringify({ error: { message: noProxyAvailableError, type: "proxy_unavailable" } }));
     return;
   }
-  if (freeTierGateState().tripped) {
+  if (prepared.fingerprintLane && freeTierGateState().tripped) {
     const gate = freeTierGateResponse();
     res.writeHead(503, { "Content-Type": "application/json", "Retry-After": String(gate.retryAfterSeconds) });
     res.end(JSON.stringify(gate.body));
@@ -389,7 +399,7 @@ export const pipeZenOpenAIResponse = (prepared: ZenPreparedRequest, stream: bool
             const parsed = JSON.parse(str);
             if (parsed.error || parsed.type === "error") {
               const errMsg = parsed.error?.message || parsed.message || "Upstream request failed";
-              if (isFreeTierBody(upstreamStatus, parsed)) tripFreeTierGate(errMsg);
+              if (prepared.fingerprintLane && isFreeTierBody(upstreamStatus, parsed)) tripFreeTierGate(errMsg);
               if (prepared.lease?.node && proxyPool) {
                 proxyPool.markFailure(prepared.lease.node.id, errMsg, { statusCode: upstreamStatus });
                 markedFailure = true;

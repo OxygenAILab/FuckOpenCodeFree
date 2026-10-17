@@ -71,7 +71,7 @@ export const registerSystemOneRoutes = async (
     }
 
     const session = sessions.getSession(sessionScopeFromHeaders(auth.id, "systemone", model, request.headers));
-    const payload = JSON.stringify({ ...body, model: resolveUpstreamModel(model) });
+    const payload = JSON.stringify({ ...body, model: config.zenFreeNaming ? resolveUpstreamModel(model) : model });
     const lease: ProxyLease | undefined = proxyPool.acquire();
     if (lease?.requiredUnavailable) {
       releaseRequest();
@@ -86,7 +86,7 @@ export const registerSystemOneRoutes = async (
       headers: {
         "Content-Type": "application/json",
         "Content-Length": Buffer.byteLength(payload),
-        Authorization: "Bearer public",
+        Authorization: `Bearer ${config.zenApiKey}`,
         "User-Agent": `opencode/${OC_VERSION} ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.13`,
         "x-opencode-client": "cli",
         "x-opencode-project": "global",
