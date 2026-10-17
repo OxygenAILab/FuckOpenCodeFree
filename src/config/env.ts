@@ -30,6 +30,25 @@ export interface AppConfig {
   adminPassword: string;
   zenHost: string;
   zenPath: string;
+  /**
+   * Credential sent upstream. Defaults to the literal `public`, which is the
+   * anonymous free-tier credential. Set `ZEN_API_KEY` to use a real Zen/Go
+   * credential against the subscription route (`/zen/go/v1/...`).
+   */
+  zenApiKey: string;
+  /**
+   * The free tier's ids carry a `-free` suffix while the client-facing names do
+   * not; the subscription route uses the bare ids. Derive it from the path so a
+   * single `ZEN_PATH` switch is enough.
+   */
+  zenFreeNaming: boolean;
+  /**
+   * Only the anonymous lane (`/inference/v1`) is behind the environment
+   * fingerprint, so only that lane needs the request shaped to satisfy it
+   * (`stream: true`, injected `bash`/`read` tools). The credential lanes
+   * (`/zen/v1`, `/zen/go/v1`) authenticate by key and take the caller's shape.
+   */
+  zenRequiresFingerprint: boolean;
   /** TypeSafe System One (`jev-*`) path; those models are not chat models. */
   zenSystemOnePath: string;
   /**
@@ -66,6 +85,13 @@ export const loadConfig = (): AppConfig => ({
   // `/zen/v1` now answers every anonymous request with 403 FreeTierError while
   // `/inference/v1` serves the same catalogue and accepts the same fingerprint.
   zenPath: process.env.ZEN_PATH || "/inference/v1/chat/completions",
+  // `public` is the anonymous free-tier credential. A real key is required by
+  // the subscription route (`ZEN_PATH=/zen/go/v1/chat/completions`).
+  zenApiKey: process.env.ZEN_API_KEY || "public",
+  // `/zen/v1` and `/inference/v1` publish the identical catalogue, `-free`
+  // ids included; only the Go catalogue uses bare ids.
+  zenFreeNaming: !(process.env.ZEN_PATH || "/inference/v1/chat/completions").includes("/zen/go/"),
+  zenRequiresFingerprint: (process.env.ZEN_PATH || "/inference/v1/chat/completions").includes("/inference/"),
   // TypeSafe's System One decision models (`jev-*`) answer on a sibling path
   // with their own request shape; they are not chat models.
   zenSystemOnePath: process.env.ZEN_SYSTEMONE_PATH || "/inference/v1/systemone",

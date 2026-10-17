@@ -14,6 +14,13 @@ export const registerHealthRoutes = async (app: FastifyInstance, config: AppConf
     surface: config.apiSurface,
     models: models.listEnabled().length,
     endpoints,
+    // Which upstream lane this instance talks to: the anonymous fingerprint
+    // lane, or a credential lane authenticated with ZEN_API_KEY.
+    upstream: {
+      path: config.zenPath,
+      credential: config.zenApiKey !== "public",
+      fingerprint: config.zenRequiresFingerprint,
+    },
     // When the upstream free-tier gate trips, the gateway stops calling
     // upstream and answers 503 itself; this reports that window so callers can
     // fail over deliberately instead of discovering it per request.
