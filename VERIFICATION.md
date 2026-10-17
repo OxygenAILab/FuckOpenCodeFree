@@ -14,11 +14,14 @@
 - 经过补丁后，网关四条路径（OpenAI 流式/非流式、Anthropic 流式/非流式）全部返回 200。
 - 对外模型名不再带上游的 `-free` 后缀，网关发请求时补回去，上游流量不变。
 
-当前启用的 10 个模型里，**7 个稳定可用**（`big-pickle`、`space-bunny`、`ll-alpha`、
+当前启用的 10 个模型里，**6 个稳定可用**（`big-pickle`、`space-bunny`、
 `nemotron-3.5-super-vl`、`mimo-v2.6-flash`、`deepseek-v4.1-flash`、`longcat-2.5-preview`，
 通常 1–9s 返回），2 个**上游间歇**（`nemotron-3.5-lightning` 约 150s 成功／约 220s 被上游
 重置；`glm-5.3-flash` 时而 200 时而 429 `Endpoint is unavailable`），1 个**地区受限**
-（`muse-spark-1.3-contributor`，本机永远 403，可直接禁用）。
+（`muse-spark-1.3-contributor`，本机永远 403，可直接禁用），1 个**只走 systemone**
+（`jev-1.13`，对话协议会回 `ModelProtocolUnsupported`）。
+
+> `ll-alpha` 曾在这 10 个里，2026-10-17 被上游退役（410），已移出。
 
 ## 2. 上游变更（2026-10-11）
 
@@ -54,7 +57,6 @@ Zen 路由被改成薄代理（上游提交 `83f2b6f67a`），门禁下沉到不
 |---|---|---|
 | `big-pickle` | ✅ 200 | |
 | `space-bunny`（上游 `space-bunny-free`） | ✅ 200 | |
-| `ll-alpha`（上游 `ll-alpha-free`） | ✅ 200 | |
 | `nemotron-3.5-lightning`（…`-free`） | ⚠️ 时好时坏 | 快时 74s 出结果；慢时上游只发 `: keep-alive` 到约 300s 后空手关闭 |
 | `nemotron-3.5-super-vl`（…`-free`） | ✅ 200 | |
 | `mimo-v2.6-flash`（…`-free`） | ✅ 200 | |
@@ -144,7 +146,7 @@ Anthropic stream      200  events=6  message_stop ✓
 |---|---|
 | `big-pickle` | `big-pickle`（**例外**：上游 id 本身无后缀） |
 | `space-bunny` | `space-bunny-free` |
-| `ll-alpha` | `ll-alpha-free` |
+| `ll-alpha` | `ll-alpha-free`（已退役，保留此行仅为记录映射规则） |
 | `nemotron-3.5-lightning` | `nemotron-3.5-lightning-free` |
 | `nemotron-3.5-super-vl` | `nemotron-3.5-super-vl-free` |
 | `mimo-v2.6-flash` | `mimo-v2.6-flash-free` |
@@ -174,8 +176,8 @@ Anthropic stream      200  events=6  message_stop ✓
 - 非流式：`assembleZenSse()` 组装时把 `model` 写成对外名。
 - 流式：`createModelRewriter()` 逐行把 `"model":"<上游名>"` 换成对外名。它用
   `StringDecoder` 解码并缓存半行，所以被 TCP 分片切断的多字节 UTF-8 字符不会被破坏。
-- 实测：`ll-alpha` 流式 39 个 chunk，流内只出现 `ll-alpha`；`mimo-v2.6-flash` 返回
-  `"中文测试"` 逐字完好。
+- 实测：`ll-alpha` 流式 39 个 chunk，流内只出现 `ll-alpha`（该测量早于它被上游退役）；
+  `mimo-v2.6-flash` 返回 `"中文测试"` 逐字完好。
 
 > 已知例外：`reasoningTagModels` / `openAiStreamTransformModels` 里的转换器是逐字节
 > 透传，不参与改名。默认这两个列表为空，不影响常规使用。
@@ -208,7 +210,7 @@ kill node PID 11256  ->  15s 后 cmd 循环拉起新进程 PID 26992，端口 64
 | 位置 | 监听 | 协议面 | 入口 |
 |---|---|---|---|
 | HK `154.219.110.138` | `127.0.0.1:6446` | all | `https://ocz.oxygenai.top`（OpenResty + CloudFlare） |
-| WSL `Ubuntu-26.04` | `127.0.0.1:6447` | openai | 仅本机 |
+| WSL `Ubuntu-26.04` | `0.0.0.0:6447`（NAT 内，仍属本机） | openai | WSL 内 `127.0.0.1:6447`；Windows 侧见 `DEPLOYMENTS.md` 的中继说明 |
 | Windows 本机 | `127.0.0.1:6446` | all | 仅本机（计划任务自启） |
 
 ### Jev 的地区差异（实测）
@@ -238,12 +240,13 @@ HK 上的多问题实测（`urgency` / `team` / `frustration` 同请求并行）
 ### 公网验证（经 CloudFlare + OpenResty）
 
 ```
-GET  https://ocz.oxygenai.top/health             200  {"status":"ok","version":"0.2.0","surface":"all","models":11,...}
-GET  https://ocz.oxygenai.top/v1/models          200  11 个模型
+GET  https://ocz.oxygenai.top/health             200  {"status":"ok","version":"0.2.0","surface":"all","models":10,...}
+GET  https://ocz.oxygenai.top/v1/models          200  10 个模型（含 jev-1.13，不含 ll-alpha）
 POST https://ocz.oxygenai.top/v1/chat/completions 200 model=space-bunny content=OK
 POST https://ocz.oxygenai.top/v1/responses       200 status=completed text=OK
 POST https://ocz.oxygenai.top/v1/systemone       200 urgency 0.99
 POST https://ocz.oxygenai.top/v1/chat/completions (stream) 7 个 SSE chunk，模型名回显正确
+POST https://ocz.oxygenai.top/v1/chat/completions model=ll-alpha  400 Unknown or disabled model
 ```
 
 `free.ocz.oxygenai.top` 解析得到 CloudFlare IP，但在边缘 TLS 握手失败：CloudFlare 通用证书的

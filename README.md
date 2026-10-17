@@ -37,7 +37,6 @@ OpenCodeProxyHub 默认内置以下免费模型，均可通过 OpenAI 兼容接�
 | `deepseek-v4.1-flash` | DeepSeek V4.1 Flash 免费模型（后端 1M 上下文） |
 | `glm-5.3-flash` | GLM 5.3 Flash 免费模型 |
 | `longcat-2.5-preview` | LongCat 2.5 Preview 免费模型 |
-| `nemotron-3-ultra` | Nvidia Nemotron 3 Ultra 免费模型（已移出上游目录但仍可服务，首字可达数分钟） |
 | `muse-spark-1.3-contributor` | Muse Spark 1.3 Contributor 免费模型 |
 | `jev-1.13` | TypeSafe System One 决策模型（走 `/v1/systemone`，不是对话模型） |
 
