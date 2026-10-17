@@ -62,6 +62,7 @@ Zen 路由被改成薄代理（上游提交 `83f2b6f67a`），门禁下沉到不
 | `glm-5.3-flash`（…`-free`） | ⚠️ 时好时坏 | 两次 200（其中一次 150s），两次 429 `Endpoint is unavailable`，属上游自身不稳 |
 | `longcat-2.5-preview`（…`-free`） | ✅ 200 | |
 | `nemotron-3-ultra`（…`-free`） | ❌ 不可用 | HTTP 200 但正文只有 `: keep-alive`，约 300s 后无数据关闭；已禁用并标注原因 |
+| `ll-alpha`（上游 `ll-alpha-free`） | ❌ 410 | `Model ll-alpha-free has been deprecated.`（2026-10-17 复测）；已退役并从默认清单移除 |
 | `beam`（上游 `beam-free`） | ❌ 403 | `This model is not available in your country` |
 | `muse-spark-1.2-contributor`（…`-free`） | ❌ 403 | 同上 |
 | `muse-spark-1.3-contributor`（…`-free`） | ❌ 403 | 同上 |

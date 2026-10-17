@@ -44,18 +44,51 @@ host returns the probabilities.
 |---|---|
 | Source | `/opt/freeopencodezen` |
 | Service | `sudo systemctl status freeopencodezen` (systemd inside WSL) |
-| Listens | `127.0.0.1:6447` — local traffic only, never bound to a routable address |
+| Listens | `0.0.0.0:6447` inside the NAT'd WSL VM — still host-local, see below |
 | Surface | `API_SURFACE=openai` — `/v1/chat/completions`, `/v1/responses`, `/v1/models` |
 | Log | `/var/log/freeopencodezen.log` |
 
 ```bash
-curl http://127.0.0.1:6447/health
+curl http://127.0.0.1:6447/health          # from inside WSL
 sudo grep -o '"name":"[a-z-]*","key":"oc-[a-f0-9]*"' /var/log/freeopencodezen.log
 ```
 
 `/v1/messages` and `/v1/systemone` are intentionally not mounted here and answer
 404. Jev is reached through the Hong Kong deployment instead, because the local
 egress is region-restricted.
+
+### Reaching it from Windows (read this before debugging "connection refused")
+
+The unit binds `0.0.0.0` **inside** WSL. WSL2 is NAT'd, so that is still host-local
+traffic only — but it gives two usable paths from Windows:
+
+| From | Address | Notes |
+|---|---|---|
+| Inside WSL | `http://127.0.0.1:6447` | the primary path; always works |
+| Windows | `http://<wsl-ip>:6447` | works; `wsl.exe -d Ubuntu-26.04 -- hostname -I` gives the IP |
+| Windows | `http://localhost:6447` | goes through `wslrelay.exe` — see the caveat |
+
+**Caveat.** Windows' `localhost` forwarding is a `wslrelay.exe` process created
+when the WSL VM starts. It binds `127.0.0.1:6447` on the Windows side and proxies
+into the distro. If the gateway inside WSL is restarted (`systemctl restart
+freeopencodezen`), that relay goes stale: the Windows-side port stays bound but
+connections hang instead of reconnecting. It does **not** self-heal — the relay
+is only recreated on the next WSL VM start.
+
+So after restarting the WSL gateway:
+
+- keep using it from inside WSL, or
+- use the WSL IP from Windows, or
+- restart the distro (`wsl --terminate Ubuntu-26.04`) — note this also drops the
+  xrdp desktop session, which the local `.wslconfig` deliberately protects with
+  `vmIdleTimeout=86400000`, so do it only when that session is idle.
+
+Because the logon task boots the distro at sign-in, a normal reboot restores the
+`localhost` path.
+
+> If `networkingMode=mirrored` is ever enabled in `.wslconfig`, `0.0.0.0` would
+> expose this port to the LAN. In that case switch `PROXY_HOST` back to
+> `127.0.0.1`.
 
 ## Windows desktop (this workstation)
 

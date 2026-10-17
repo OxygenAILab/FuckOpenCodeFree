@@ -3,7 +3,6 @@ import { JsonFileStore } from "../storage/jsonFile.js";
 export const DEFAULT_MODELS = [
   "big-pickle",
   "space-bunny",
-  "ll-alpha",
   "nemotron-3.5-lightning",
   "nemotron-3.5-super-vl",
   "mimo-v2.6-flash",
@@ -23,7 +22,7 @@ export const RETIRED_MODELS: ReadonlyArray<{ id: string; reason: string }> = [
   // Renamed: the client-facing ids dropped the upstream `-free` suffix, and the
   // gateway re-adds it when building the upstream request.
   { id: "space-bunny-free", reason: "Renamed to space-bunny" },
-  { id: "ll-alpha-free", reason: "Renamed to ll-alpha" },
+  { id: "ll-alpha-free", reason: "Deprecated by upstream, and superseded by the public name ll-alpha" },
   { id: "nemotron-3.5-lightning-free", reason: "Renamed to nemotron-3.5-lightning" },
   { id: "nemotron-3.5-super-vl-free", reason: "Renamed to nemotron-3.5-super-vl" },
   { id: "mimo-v2.6-flash-free", reason: "Renamed to mimo-v2.6-flash" },
@@ -35,6 +34,10 @@ export const RETIRED_MODELS: ReadonlyArray<{ id: string; reason: string }> = [
   // with `: keep-alive` comments for ~300s and then closes without any data.
   { id: "nemotron-3-ultra", reason: "Upstream holds the stream open ~300s and never sends a completion" },
   { id: "nemotron-3-ultra-free", reason: "Upstream holds the stream open ~300s and never sends a completion" },
+  // Upstream answers 410 `Model ll-alpha-free has been deprecated.` (observed
+  // 2026-10-17). Both spellings are retired so an upgraded deployment drops it
+  // from the list instead of serving a model that always fails.
+  { id: "ll-alpha", reason: "Deprecated by upstream: 410 'Model ll-alpha-free has been deprecated.'" },
   { id: "mimo-v2.5-free", reason: "Deprecated by upstream, superseded by mimo-v2.6-flash-free" },
   { id: "ling-3.0-flash-fin-free", reason: "Upstream answers 'Model is unavailable'" },
   { id: "nemotron-3-super-free", reason: "Model no longer supported by upstream" },

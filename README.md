@@ -31,7 +31,6 @@ OpenCodeProxyHub 默认内置以下免费模型，均可通过 OpenAI 兼容接�
 |--------|------|
 | `big-pickle` | OpenCode 免费模型（stealth） |
 | `space-bunny` | Space Bunny 免费模型 |
-| `ll-alpha` | LL Alpha 免费模型 |
 | `nemotron-3.5-lightning` | Nvidia Nemotron 3.5 Lightning 免费模型 |
 | `nemotron-3.5-super-vl` | Nvidia Nemotron 3.5 Super VL 免费模型 |
 | `mimo-v2.6-flash` | Mimo v2.6 Flash 免费模型（后端 1M 上下文） |
@@ -139,7 +138,7 @@ npm start            # 运行已构建的 dist/main.js
   `response.completed` 等），Codex 这类只会说 Responses 协议的客户端可以直接接
 - **System One（Jev）**：TypeSafe 的决策模型不是对话模型，只接受 `state` + 类型化
   `questions`，返回校准概率。上游对部分区域返回 451，需要非受限出口
-- **默认免费模型**：内置 11 个可用免费模型，详见上方“可用免费模型”
+- **默认免费模型**：内置 10 个可用免费模型，详见上方“可用免费模型”
 - **流式归一化转换（可按模型开启）**
   - `anthropic-sse-to-openai`：把上游的 Anthropic 风格 SSE 转成 OpenAI 风格 SSE
   - `think-to-reasoning`：把内联在 `delta.content` 里的 `<think>...</think>` 推理内容抽取到 `reasoning_content` 字段，正文只保留答案（支持标签跨 chunk 的状态机处理）
@@ -510,6 +509,7 @@ OpenCodeProxyHub 独立维护，与 OpenCode、`opencode-free-proxy` 及任何�
   - 把 Node 的 `server.requestTimeout` 提到 `upstreamTimeoutMs + 60s`（默认 300s 会静默切断长流）。
   - 上游返回空流（只有 `: keep-alive`）时非流式路径报 502，不再当作成功。
   - `scripts/hub-service.cmd` + `hub-service.vbs` 提供 Windows 登录自启与崩溃自愈。
+  - 上游退役 `ll-alpha-free`（实测 410 `has been deprecated`），已移出默认清单并标记下线。
   - 实测证据与逐模型结果见 [`VERIFICATION.md`](./VERIFICATION.md)。
 
 - **v0.1.9**：同步官方 Zen 免费模型：新增 `ling-3.0-flash-fin-free`（实测可用）与 `muse-spark-1.3-contributor-free`（Muse Spark 1.3，注意本地区可能 403）两个默认免费模型；退役 `laguna-s-2.1-free`（上游 401 下线）与 `muse-spark-1.2-contributor-free`（被 1.3 取代）。默认免费模型保持 6 个。升级后自动禁用退役模型、追加缺失默认模型，不覆盖用户已有配置；老设备升级无需手动改 `models.json`
