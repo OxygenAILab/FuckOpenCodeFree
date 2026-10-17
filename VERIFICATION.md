@@ -113,7 +113,7 @@ Zen 路由被改成薄代理（上游提交 `83f2b6f67a`），门禁下沉到不
 | 源码 | `C:\Users\Sails\Documents\Workspace\01-Active\OpenCodeProxyHub-src` |
 | 监听 | `http://127.0.0.1:6446` |
 | 控制台 | `http://127.0.0.1:6446/app` |
-| 控制台密码 | `opencode-hub-local`（见 `.env`） |
+| 控制台密码 | 见本机 `.env` 的 `ADMIN_PASSWORD`（不入库） |
 | 上游超时 | 600000 ms |
 | 启动方式 | 计划任务 `OpenCodeProxyHub`（登录触发）→ `scripts\hub-service.vbs` → `hub-service.cmd` → `node dist/main.js` |
 | 日志 | `logs\service.log`（网关输出与重启记录） |
