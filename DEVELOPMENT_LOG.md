@@ -1574,3 +1574,36 @@ Deployments:
 
 - 代码同步至 Windows、WSL `/opt/freeopencodezen`、香港 `/opt/freeopencodezen`。
 - WSL 的 `mihomo-oc.service` 与 `hk-tunnel-mihomo.service` 均已 enable 并 active。
+
+## 2026-10-19 — 分离客户端身份门与出口 IP abuse 门
+
+Context:
+
+- 上游用同一个 `403 FreeTierError` 类型返回两种失败：客户端身份门和出口 IP
+  信誉门。网关此前把两者都当成“非 OpenCode 客户端”，导致 IP 封禁时给出误导
+  的 503 提示。
+- 实测官方 OpenCode 1.19.3 CLI 在同一个被封 Clash 出口上返回同样的
+  `abusive traffic` 错误；官方 TUI 与网关的请求形状/代理网络栈不是差异点。
+
+Implemented:
+
+- `src/providers/upstreamGate.ts`：新增 `classifyFreeTierError()`、
+  `free_tier_ip_abuse` code、`kind` 状态字段，以及按 kind 定制共享熔断消息。
+- `src/config/env.ts`：新增 `FREE_TIER_ABUSE_COOLDOWN_MS` 与
+  `FREE_TIER_ABUSE_GATE_COOLDOWN_MS`，默认均为 1 小时。
+- `src/providers/zenClient.ts`：403 handler 对 abuse 分类使用更长节点冷却；
+  新增 `probeFreeTierEgress()` 最小官方请求探测；`errorPayload()` 保留网关自己的
+  `code` / `gate` 字段。
+- `src/proxy/proxyPool.ts` 与 `src/routes/admin.ts`：新增
+  `POST /admin/proxies/:id/probe-free-tier`，返回
+  `kind=ok|client_identity|ip_abuse`。
+- README、`.env.example`、DECISIONS、VERIFICATION 同步记录两类门的区别。
+
+Verified:
+
+- `npm run typecheck`、`npm run build`、离线单测通过；单测新增
+  `abuseClassifiedAsIp` / `abuseCode` / `abuseKind` 与
+  `clientClassifiedAsIdentity` / `clientCode` / `clientKind` 断言。
+- 探测接口对当前 WSL `日本-02` 返回 `status=403, kind=ip_abuse`。
+- 网关第一次请求返回上游 abuse 403；共享熔断后返回
+  `503 code=free_tier_ip_abuse`，`/health` 显示 `kind=ip_abuse` 与 1 小时窗口。

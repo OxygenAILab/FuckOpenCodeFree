@@ -2,6 +2,32 @@
 
 短小的决策台账，防止后续 agent 重复提议已经否决过的方向。
 
+## 2026-10-19 — 区分客户端身份门与出口 IP abuse 门
+
+**背景**：上游把两种不同的失败都包成 `403 FreeTierError`：
+
+1. `OpenCode's free tier can only be used from within OpenCode`（客户端身份门）；
+2. `abusive traffic from this IP address … VPN or proxy`（出口 IP 信誉门）。
+
+实测官方 OpenCode 1.19.3 CLI 通过同一个被封 Clash 出口时，也返回第 2 类错误；
+官方客户端与网关在该出口上的网络栈/请求形状一致。因此第 2 类不是“再复刻一点
+客户端”能解决的，必须换干净 IP 或等待封禁窗口结束。
+
+**决定**：
+
+1. 新增 `classifyFreeTierError()`，把 `FreeTierError` 分为
+   `client_identity` / `ip_abuse` / `unknown`。
+2. IP abuse 的节点冷却用 `FREE_TIER_ABUSE_COOLDOWN_MS`（默认 1 小时）；
+   所有节点都 abuse 时共享熔断用 `FREE_TIER_ABUSE_GATE_COOLDOWN_MS`（默认 1 小时）。
+3. `/health` 的 `upstreamFreeTier.kind` 暴露类型；响应 code 分别为
+   `free_tier_gated` 与 `free_tier_ip_abuse`，不再把 IP 封禁误报成“需要 OpenCode Client”。
+4. 新增 `POST /admin/proxies/:id/probe-free-tier`，对一个节点发一条官方最小请求，
+   返回 `kind=ok|client_identity|ip_abuse`，用于验证新出口。
+
+**结论**：复刻 TUI 只能过客户端身份门；免费层能否使用取决于出口 IP 是否被上游
+判定为 VPN/代理/abusive。当前订阅节点与 Clash 活动节点都已被封，必须提供干净
+家宽/直连出口，或等待封禁解除。
+
 ## 2026-10-18 — 免费层 UA 按动态验证修正为 4.0.23
 
 **背景**：2026-10-17 的第 6 篇 REA 文档从 Bun bundle 里静态扫到了

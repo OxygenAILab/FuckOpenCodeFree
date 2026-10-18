@@ -91,6 +91,10 @@ export interface AppConfig {
   freeTierBanCooldownMs: number;
   /** Cooldown for a proxy node that failed at the transport layer (reset/TLS). */
   freeTierTransportCooldownMs: number;
+  /** Cooldown for an egress the upstream marked as abusive VPN/proxy traffic. */
+  freeTierAbuseCooldownMs: number;
+  /** Shared breaker window when every egress is abuse-blocked. */
+  freeTierAbuseGateCooldownMs: number;
 }
 
 export const loadConfig = (): AppConfig => ({
@@ -137,4 +141,6 @@ export const loadConfig = (): AppConfig => ({
   freeTierRetryAttempts: Math.min(10, Math.max(1, intFromEnv("FREE_TIER_RETRY_ATTEMPTS", 3))),
   freeTierBanCooldownMs: Math.max(60_000, intFromEnv("FREE_TIER_BAN_COOLDOWN_MS", 15 * 60 * 1000)),
   freeTierTransportCooldownMs: Math.max(5_000, intFromEnv("FREE_TIER_TRANSPORT_COOLDOWN_MS", 60_000)),
+  freeTierAbuseCooldownMs: Math.max(60_000, intFromEnv("FREE_TIER_ABUSE_COOLDOWN_MS", 60 * 60 * 1000)),
+  freeTierAbuseGateCooldownMs: Math.max(60_000, intFromEnv("FREE_TIER_ABUSE_GATE_COOLDOWN_MS", 60 * 60 * 1000)),
 });

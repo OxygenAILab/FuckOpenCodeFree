@@ -46,7 +46,9 @@ OpenCodeProxyHub 默认内置以下免费模型，均可通过 OpenAI 兼容接�
 
 > **上游指纹门（2026-10-11 起，2026-10-17 静态提取、2026-10-18 动态修正）**：免费层已从 `/zen/v1` 迁到 `/inference/v1`，旧路径对匿名请求一律返回 `403 FreeTierError`。网关按官方 CLI 的实际请求构造：走 `/inference/v1`；强制 `stream: true`（非流式客户端由网关把 SSE 折叠成单个 JSON 响应）；请求体带 `bash` 与 `read` 两个工具（按小写名精确匹配，各自带真实参数 schema，缺失即 403，网关会自动补齐占位工具）；请求头为官方客户端对 `opencode/*` provider 发的那一组 —— `x-opencode-session-id` 与 `x-opencode-session` 同值、`x-opencode-project: global`、`x-opencode-request`（每请求一个 `msg_` id）、`x-opencode-client: cli`，以及 `User-Agent: opencode/1.19.3 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14`；**不发** `HTTP-Referer`，也默认不发 `x-session-affinity` / `x-session-id`（那两个是官方给非 OpenCode provider 用的，需要旧行为时用 `ZEN_LEGACY_SESSION_HEADERS=1`）。session id 前 12 位 hex 必须是取反后的时间戳（`ses_` 降序），纯随机或摘要派生即拒。请求头与 id 铸造来自官方 v1.19.3 产物的静态提取，UA 版本由受控动态捕获修正为 `4.0.23`；两份证据见 `OpenCode-REA-2026-10-17/06-free-tier-fingerprint.zh.md` 与 `07-dynamic-verification.zh.md`。上游错误现在按真实状态码透传（403 不再被改写成 429）。
 
-> **出口信誉与轮换（2026-10-17，2026-10-18 增加 LRU 轮换）**：门禁判定的是**出口 IP**，不是请求形态——同一份请求在大陆直连是 403、经普通代理出口则是 200。网关因此在指纹通道上做出口轮换：403 `FreeTierError` 把该节点冷却 15 分钟后换出口并用新 session 重试；传输层失败（TLS 重置/断连）只冷却 60 秒后换出口重试；429 短暂冷却后换出口重试；全部尝试失败才触发共享熔断。代理池按**最久未使用优先**选择节点（权重只在并列时参与排序），避免所有请求压在同一个出口 IP 上被上游按 IP 限流。尝试次数与冷却分别由 `FREE_TIER_RETRY_ATTEMPTS`、`FREE_TIER_BAN_COOLDOWN_MS`、`FREE_TIER_TRANSPORT_COOLDOWN_MS`、`FREE_TIER_GATE_COOLDOWN_MS` 控制；没有配置任何出口节点时行为回退到"直连 → 403 → 熔断"。当前活动出口是 WSL `mihomo-oc` 的 `日本-02` / `日本-03` 固定监听器；`香港-02` 因上游 abuse 检测暂缓启用并保留为备用。Windows、WSL 直接使用这些监听器，香港实例通过 WSL 发起的反向 SSH 隧道使用同一组出口。
+> **出口信誉与轮换（2026-10-17，2026-10-18 增加 LRU 轮换，2026-10-19 区分错误类型）**：门禁判定的是**出口 IP**，不是请求形态——同一份请求在大陆直连是 403、经普通代理出口则是 200。网关因此在指纹通道上做出口轮换：403 `FreeTierError` 先按错误文本分类——客户端身份门用 `FREE_TIER_BAN_COOLDOWN_MS`，出口 IP abuse 门用 `FREE_TIER_ABUSE_COOLDOWN_MS`（默认 1 小时）；传输层失败（TLS 重置/断连）只冷却 60 秒后换出口重试；429 短暂冷却后换出口重试；全部尝试失败才触发共享熔断。代理池按**最久未使用优先**选择节点（权重只在并列时参与排序），避免所有请求压在同一个出口 IP 上被上游按 IP 限流。尝试次数与冷却分别由 `FREE_TIER_RETRY_ATTEMPTS`、`FREE_TIER_BAN_COOLDOWN_MS`、`FREE_TIER_TRANSPORT_COOLDOWN_MS`、`FREE_TIER_ABUSE_COOLDOWN_MS`、`FREE_TIER_GATE_COOLDOWN_MS`、`FREE_TIER_ABUSE_GATE_COOLDOWN_MS` 控制；没有配置任何出口节点时行为回退到"直连 → 403 → 熔断"。当前活动出口是 WSL `mihomo-oc` 的 `日本-02` / `日本-03` 固定监听器；`香港-02` 因上游 abuse 检测暂缓启用并保留为备用。Windows、WSL 直接使用这些监听器，香港实例通过 WSL 发起的反向 SSH 隧道使用同一组出口。
+
+> **两类 `FreeTierError` 不要混淆（2026-10-19）**：上游把两种完全不同的失败都包成 `403 FreeTierError`。第一类是**客户端身份门**（“can only be used from within OpenCode”），复刻官方请求头/工具/会话形状即可通过；第二类是**出口 IP 信誉门**（“abusive traffic … VPN or proxy”），它只认 IP/网络信誉，与请求形状无关。实测官方 OpenCode 1.19.3 CLI 在同一个被封出口上也会得到同样的 abuse 错误，所以“复刻 TUI”只能解决第一类。网关现在用 `free_tier_gated` 与 `free_tier_ip_abuse` 两个 code 区分，并在 `/health` 的 `upstreamFreeTier.kind` 中暴露类型。可用 `POST /admin/proxies/:id/probe-free-tier` 对一个节点发一条官方最小请求，返回 `kind=ok|client_identity|ip_abuse`。
 
 新部署会自动生成以上默认模型；已有部署升级后，缺失的默认免费模型会自动追加到已有 `models.json`，不会覆盖用户已修改的模型配置。带旧 `-free` 后缀的条目会在升级时自动禁用并标注 `(retired: Renamed to …)`；上游已下线的模型（如 `mimo-v2.5-free`、`ling-3.0-flash-fin-free`、`laguna-s-2.1-free`、`deepseek-v4-flash-free`、`hy3-free`、`x-preview-f-free`、`north-mini-code-free`、`longcat-2.0-free`）同样会自动禁用并标记原因，用户无需手动清理。此前被自动禁用的模型若重新上线，升级后会仅恢复带下线标注的条目自动重新启用；用户手动关闭的不受影响。
 
@@ -358,7 +360,9 @@ API_KEY_MAX_CONCURRENT_STREAMS=5        # 单 Key 并发流上限
 FREE_TIER_RETRY_ATTEMPTS=3              # 指纹通道每次请求的最大出口尝试次数
 FREE_TIER_BAN_COOLDOWN_MS=900000        # 出口被判 403 后的冷却（毫秒）
 FREE_TIER_TRANSPORT_COOLDOWN_MS=60000   # 出口传输层失败后的冷却（毫秒）
+FREE_TIER_ABUSE_COOLDOWN_MS=3600000     # 出口被判 IP abuse 后的冷却（毫秒）
 FREE_TIER_GATE_COOLDOWN_MS=60000        # 全部尝试失败后的共享熔断窗口（毫秒）
+FREE_TIER_ABUSE_GATE_COOLDOWN_MS=3600000 # 全部出口都 IP abuse 时的共享窗口（毫秒）
 REDIS_URL=                              # 留空=内存限流；填写=Redis 分布式限流
 REDIS_KEY_PREFIX=opencode-proxy-hub:limit
 SHUTDOWN_DRAIN_TIMEOUT_MS=30000         # 优雅停机排空超时

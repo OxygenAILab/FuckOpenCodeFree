@@ -3,10 +3,17 @@ import type { ServerResponse } from "node:http";
 import { StringDecoder } from "node:string_decoder";
 import { mintZenId } from "../utils/ids.js";
 import { resolveUpstreamModel } from "../models/naming.js";
-import { freeTierGateResponse, freeTierGateState, isFreeTierBody, tripFreeTierGate } from "./upstreamGate.js";
+import {
+  classifyFreeTierError,
+  freeTierGateResponse,
+  freeTierGateState,
+  isFreeTierBody,
+  tripFreeTierGate,
+  type FreeTierErrorKind,
+} from "./upstreamGate.js";
 import type { AppConfig } from "../config/env.js";
 import type { ZenFullResponse } from "../types/api.js";
-import type { ProxyLease, ProxyPoolStore } from "../proxy/proxyPool.js";
+import type { ProxyLease, ProxyNode, ProxyPoolStore } from "../proxy/proxyPool.js";
 import type { MetricsStore } from "../observability/metrics.js";
 
 const noProxyAvailableError = "Proxy is required but no proxy node is available";
@@ -38,6 +45,16 @@ export const errorPayload = (status: number, parsed: any, fallback: string) => {
   const upstreamType =
     typeof parsed?.error?.type === "string" ? parsed.error.type : typeof parsed?.type === "string" ? parsed.type : undefined;
   const message = parsed?.error?.message || parsed?.message || fallback;
+  if (parsed?.error?.gate && typeof parsed.error.code === "string") {
+    return {
+      error: {
+        message: String(message),
+        type: upstreamType ?? "permission_error",
+        code: parsed.error.code,
+        gate: parsed.error.gate,
+      },
+    };
+  }
   const type = status === 429 ? "rate_limit_error" : status === 401 || status === 403 ? "permission_error" : "upstream_error";
   const code = upstreamType && upstreamType !== "error" ? upstreamType : status === 429 ? "rate_limit_exceeded" : "upstream_error";
   return { error: { message: String(message), type, code } };
@@ -136,6 +153,10 @@ export interface ZenPreparedRequest {
   banCooldownMs: number;
   /** Cooldown applied to an egress that failed at the transport layer. */
   transportCooldownMs: number;
+  /** Cooldown when the upstream marks the egress IP itself as abusive. */
+  abuseCooldownMs: number;
+  /** Shared breaker window when every egress is abuse-blocked. */
+  abuseGateCooldownMs: number;
   /** 0 on the first attempt; incremented by `rotateZenAttempt`. */
   attempt: number;
   /** Proxy node ids already used, so a retry never reuses a flagged egress. */
@@ -229,6 +250,8 @@ export const prepareZenRequest = (config: AppConfig, input: ZenRequestInput, pro
     maxAttempts: config.freeTierRetryAttempts,
     banCooldownMs: config.freeTierBanCooldownMs,
     transportCooldownMs: config.freeTierTransportCooldownMs,
+    abuseCooldownMs: config.freeTierAbuseCooldownMs,
+    abuseGateCooldownMs: config.freeTierAbuseGateCooldownMs,
     attempt: 0,
     triedProxyIds: lease?.node ? [lease.node.id] : [],
     options: {
@@ -258,14 +281,15 @@ export const prepareZenRequest = (config: AppConfig, input: ZenRequestInput, pro
 export const rotateZenAttempt = (
   prepared: ZenPreparedRequest,
   proxyPool?: ProxyPoolStore,
+  options: { reason?: string; cooldownMs?: number } = {},
 ): ZenPreparedRequest | null => {
   if (prepared.attempt + 1 >= prepared.maxAttempts) return null;
   if (!proxyPool) return null;
 
   if (prepared.lease?.node) {
-    proxyPool.markFailure(prepared.lease.node.id, "Upstream returned 403 FreeTierError", {
+    proxyPool.markFailure(prepared.lease.node.id, options.reason ?? "Upstream returned 403 FreeTierError", {
       statusCode: 403,
-      cooldownMs: prepared.banCooldownMs,
+      cooldownMs: options.cooldownMs ?? prepared.banCooldownMs,
     });
   }
 
@@ -287,6 +311,36 @@ export const rotateZenAttempt = (
     attempt: prepared.attempt + 1,
     triedProxyIds: [...tried],
     options: { ...prepared.options, headers, agent: lease.agent },
+  };
+};
+
+const freeTierMessage = (body: unknown, fallback: string): string => {
+  if (typeof body === "string" && body.trim()) return body;
+  if (body && typeof body === "object") {
+    const parsed = body as { error?: { message?: unknown }; message?: unknown };
+    if (typeof parsed.error?.message === "string") return parsed.error.message;
+    if (typeof parsed.message === "string") return parsed.message;
+  }
+  return fallback;
+};
+
+const freeTierFailure = (
+  prepared: ZenPreparedRequest,
+  body: unknown,
+): {
+  kind: FreeTierErrorKind;
+  rotation?: { reason: string; cooldownMs: number };
+  gateCooldownMs?: number;
+} => {
+  const kind = classifyFreeTierError(body);
+  if (kind !== "ip_abuse") return { kind };
+  return {
+    kind,
+    rotation: {
+      reason: freeTierMessage(body, "Upstream blocked this egress IP as abusive traffic"),
+      cooldownMs: prepared.abuseCooldownMs,
+    },
+    gateCooldownMs: prepared.abuseGateCooldownMs,
   };
 };
 
@@ -445,12 +499,13 @@ export const requestZenFull = (prepared: ZenPreparedRequest, proxyPool?: ProxyPo
           try {
             const parsed = JSON.parse(raw);
             if (prepared.fingerprintLane && isFreeTierBody(status, parsed)) {
-              const next = rotateZenAttempt(prepared, proxyPool);
+              const failure = freeTierFailure(prepared, parsed);
+              const next = rotateZenAttempt(prepared, proxyPool, failure.rotation);
               if (next) {
                 resolve(requestZenFull(next, proxyPool, metrics));
                 return;
               }
-              tripFreeTierGate(parsed?.error?.message ?? "FreeTierError");
+              tripFreeTierGate(freeTierMessage(parsed, "FreeTierError"), failure.kind, failure.gateCooldownMs);
             } else if (prepared.fingerprintLane && status === 429) {
               // The free tier rate-limits per egress; another node is worth a try.
               const next = retryZenTransport(prepared, proxyPool, parsed?.error?.message ?? "FreeUsageLimitError", 429);
@@ -462,12 +517,13 @@ export const requestZenFull = (prepared: ZenPreparedRequest, proxyPool?: ProxyPo
             resolve({ status, data: parsed, raw });
           } catch {
             if (prepared.fingerprintLane && isFreeTierBody(status, raw)) {
-              const next = rotateZenAttempt(prepared, proxyPool);
+              const failure = freeTierFailure(prepared, raw);
+              const next = rotateZenAttempt(prepared, proxyPool, failure.rotation);
               if (next) {
                 resolve(requestZenFull(next, proxyPool, metrics));
                 return;
               }
-              tripFreeTierGate("FreeTierError");
+              tripFreeTierGate(freeTierMessage(raw, "FreeTierError"), failure.kind, failure.gateCooldownMs);
             }
             resolve({ status, data: null, raw });
           }
@@ -556,7 +612,8 @@ export const pipeZenOpenAIResponse = (prepared: ZenPreparedRequest, stream: bool
             if (parsed.error || parsed.type === "error") {
               const errMsg = parsed.error?.message || parsed.message || "Upstream request failed";
               if (prepared.fingerprintLane && isFreeTierBody(upstreamStatus, parsed)) {
-                const next = rotateZenAttempt(prepared, proxyPool);
+                const failure = freeTierFailure(prepared, parsed);
+                const next = rotateZenAttempt(prepared, proxyPool, failure.rotation);
                 if (next) {
                   retried = true;
                   markedFailure = true;
@@ -564,7 +621,7 @@ export const pipeZenOpenAIResponse = (prepared: ZenPreparedRequest, stream: bool
                   pipeZenOpenAIResponse(next, stream, res, proxyPool, metrics);
                   return;
                 }
-                tripFreeTierGate(errMsg);
+                tripFreeTierGate(errMsg, failure.kind, failure.gateCooldownMs);
                 markedFailure = true;
               } else if (prepared.fingerprintLane && upstreamStatus === 429) {
                 const next = retryZenTransport(prepared, proxyPool, errMsg, 429);
@@ -669,4 +726,98 @@ export const pipeZenOpenAIResponse = (prepared: ZenPreparedRequest, stream: bool
 
   req.write(prepared.body);
   req.end();
+};
+
+export interface FreeTierProbeResult {
+  ok: boolean;
+  status: number;
+  kind: FreeTierErrorKind | "ok";
+  message: string;
+  bodyHead: string;
+}
+
+/**
+ * Send one minimal official-shape request through a specific egress. This is
+ * the only reliable way to tell apart the two upstream gates:
+ * - `client_identity`: the request shape is wrong;
+ * - `ip_abuse`: the egress IP itself is blocked, and the official client on
+ *   that same IP gets the same error.
+ */
+export const probeFreeTierEgress = async (
+  config: AppConfig,
+  node: ProxyNode,
+  agent: https.Agent,
+): Promise<FreeTierProbeResult> => {
+  const session = mintZenId("ses", true);
+  const requestId = mintZenId("msg", false);
+  const payload = JSON.stringify({
+    model: resolveUpstreamModel("deepseek-v4.1-flash"),
+    messages: [{ role: "user", content: "reply with exactly: ok" }],
+    stream: true,
+    max_tokens: 8,
+    tools: ensureZenTools([]),
+  });
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "Content-Length": String(Buffer.byteLength(payload)),
+    Accept: "text/event-stream",
+    "User-Agent": config.zenOpencodeUa,
+    Authorization: `Bearer ${config.zenApiKey}`,
+    "x-opencode-session-id": session,
+    "x-opencode-session": session,
+    "x-opencode-project": "global",
+    "x-opencode-request": requestId,
+    "x-opencode-client": "cli",
+  };
+
+  return await new Promise<FreeTierProbeResult>((resolve) => {
+    const req = https.request(
+      {
+        hostname: config.zenHost,
+        port: 443,
+        path: config.zenPath,
+        method: "POST",
+        headers,
+        agent,
+        timeout: Math.min(config.upstreamTimeoutMs, 45_000),
+      },
+      (res) => {
+        const status = res.statusCode || 502;
+        if (status >= 200 && status < 300) {
+          res.resume();
+          resolve({ ok: true, status, kind: "ok", message: "free tier accepted the official probe", bodyHead: "" });
+          return;
+        }
+        const chunks: Buffer[] = [];
+        let size = 0;
+        res.on("data", (chunk: Buffer) => {
+          if (size >= 16 * 1024) return;
+          chunks.push(chunk);
+          size += chunk.length;
+        });
+        res.on("end", () => {
+          const raw = Buffer.concat(chunks).toString();
+          let kind: FreeTierErrorKind = "unknown";
+          let message = `Upstream probe returned ${status}`;
+          try {
+            const parsed = JSON.parse(raw);
+            kind = classifyFreeTierError(parsed);
+            message = freeTierMessage(parsed, message);
+          } catch {
+            kind = classifyFreeTierError(raw);
+            message = freeTierMessage(raw, message);
+          }
+          resolve({ ok: false, status, kind, message, bodyHead: raw.slice(0, 500) });
+        });
+      },
+    );
+    req.on("error", (error) => {
+      resolve({ ok: false, status: 0, kind: "unknown", message: error.message, bodyHead: "" });
+    });
+    req.on("timeout", () => {
+      req.destroy();
+      resolve({ ok: false, status: 0, kind: "unknown", message: "probe timeout", bodyHead: "" });
+    });
+    req.end(payload);
+  });
 };

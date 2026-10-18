@@ -80,6 +80,18 @@ export class ProxyPoolStore {
     return this.proxies.map((proxy) => ({ ...proxy }));
   }
 
+  get(id: string): ProxyNode | undefined {
+    const node = this.find(id);
+    return node ? { ...node } : undefined;
+  }
+
+  agentFor(id: string): https.Agent {
+    const node = this.find(id);
+    if (!node) throw new Error("Proxy not found");
+    this.validateNode(node);
+    return this.createAgent(node);
+  }
+
   create(input: ProxyInput): ProxyNode {
     const node = this.buildNode(input);
     this.validateNode(node);

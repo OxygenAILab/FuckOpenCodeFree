@@ -9,6 +9,7 @@ import type { AsyncLimiter } from "../rateLimit/limiter.js";
 import type { RequestTracker } from "../runtime/requestTracker.js";
 import type { MetricsStore } from "../observability/metrics.js";
 import { clientIdFromHeaders, type EventLogger } from "../observability/eventLogger.js";
+import { probeFreeTierEgress } from "../providers/zenClient.js";
 
 interface CreateKeyBody {
   name?: string;
@@ -194,6 +195,33 @@ export const registerAdminRoutes = async (
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to test proxy";
       audit(request, "proxy.test", "failure", { targetId: request.params.id, error: message });
+      return reply.code(400).send({ error: { message } });
+    }
+  });
+
+  app.post<{ Params: { id: string } }>("/admin/proxies/:id/probe-free-tier", async (request, reply) => {
+    const node = proxyPool.get(request.params.id);
+    if (!node) {
+      audit(request, "proxy.probe_free_tier", "failure", { targetId: request.params.id, error: "Proxy not found" });
+      return reply.code(404).send({ error: { message: "Proxy not found" } });
+    }
+    try {
+      const result = await probeFreeTierEgress(config, node, proxyPool.agentFor(node.id));
+      audit(request, "proxy.probe_free_tier", result.ok ? "success" : "failure", {
+        targetId: node.id,
+        targetName: node.name,
+        status: result.status,
+        kind: result.kind,
+      });
+      return reply.send({
+        data: {
+          node: { id: node.id, name: node.name, url: node.url },
+          ...result,
+        },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to probe free tier";
+      audit(request, "proxy.probe_free_tier", "failure", { targetId: node.id, targetName: node.name, error: message });
       return reply.code(400).send({ error: { message } });
     }
   });
