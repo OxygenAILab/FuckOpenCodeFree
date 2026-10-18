@@ -370,7 +370,9 @@ runtime/bun/1.3.14`，不是静态扫描命中的 `4.0.45`。据此更新 `env.t
 
 - `npm run typecheck`、`npm run build` 通过。
 - `_scratch/zen-probe-20261017/rotate-unit-test.mjs` 全部 PASS，新增断言：
-  `lruFirstIsA=true`、`lruSecondIsB=true`（两个健康节点按最久未使用顺序交替）。
+  `lruFirstIsA=true`、`lruSecondIsB=true`（两个健康节点按最久未使用顺序交替），
+  以及 `defaultFailureCooldownShort=true`、`successClearsCooldown=true`、
+  `reenableClearsCooldown=true`（瞬时失败只冷却 60 秒，成功/重新启用立即清冷却）。
 
 **部署验证**
 

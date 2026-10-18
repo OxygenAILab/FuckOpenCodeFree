@@ -99,7 +99,8 @@ export class ProxyPoolStore {
       node.enabled = input.enabled;
       if (input.enabled) {
         node.consecutiveRateLimitCount = 0;
-        if (node.lastError === "Disabled after 5 consecutive 429 responses") node.lastError = null;
+        node.cooldownUntil = null;
+        node.lastError = null;
       }
     }
     if (input.weight !== undefined) node.weight = Math.max(1, Math.trunc(input.weight));
@@ -163,6 +164,7 @@ export class ProxyPoolStore {
     if (!node) return;
     node.successCount += 1;
     node.consecutiveRateLimitCount = 0;
+    node.cooldownUntil = null;
     this.recordResult(node, true, 200);
     node.lastError = null;
     node.lastCheckedAt = new Date().toISOString();
@@ -189,7 +191,7 @@ export class ProxyPoolStore {
         node.lastError = "Disabled after 5 consecutive 429 responses";
       }
     } else {
-      node.cooldownUntil = new Date(Date.now() + (options.cooldownMs ?? 5 * 60 * 1000)).toISOString();
+      node.cooldownUntil = new Date(Date.now() + (options.cooldownMs ?? 60 * 1000)).toISOString();
     }
     this.release(id);
   }

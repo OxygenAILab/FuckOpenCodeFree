@@ -1549,6 +1549,8 @@ Implemented:
 
 - `src/proxy/proxyPool.ts`：`acquire()` 改为最久未使用优先，权重只在并列时排序；
   请求随健康节点轮换。
+- `src/proxy/proxyPool.ts`：非 429 临时失败的默认冷却从 5 分钟缩短为 60 秒；
+  `markSuccess()` 与运营 `enabled=true` 更新都会清除 `cooldownUntil`。
 - WSL `mihomo-oc.service`：订阅筛选为 `香港-02` / `日本-02`，并增加固定监听器
   `17895` / `17896`。
 - WSL `hk-tunnel-mihomo.service`：向香港暴露 `17892 → 17895`、
@@ -1558,7 +1560,9 @@ Implemented:
 Verified:
 
 - `npm run typecheck`、`npm run build`、离线单测全部通过；新增 LRU 断言
-  `lruFirstIsA` / `lruSecondIsB` 为 true。
+  `lruFirstIsA` / `lruSecondIsB`，以及冷却恢复断言
+  `defaultFailureCooldownShort` / `successClearsCooldown` /
+  `reenableClearsCooldown` 为 true。
 - Windows、WSL、香港各 10 轮连续请求：10/10 成功。
 - 单节点 403 后 LRU 自动切换另一节点，共享熔断保持 `tripped=false`。
 - 公网 `POST https://ocz.oxygenai.top/v1/chat/completions`：非流式 200、
