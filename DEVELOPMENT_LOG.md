@@ -1607,3 +1607,31 @@ Verified:
 - 探测接口对当前 WSL `日本-02` 返回 `status=403, kind=ip_abuse`。
 - 网关第一次请求返回上游 abuse 403；共享熔断后返回
   `503 code=free_tier_ip_abuse`，`/health` 显示 `kind=ip_abuse` 与 1 小时窗口。
+
+## 2026-10-19 — 改用干净原网直连，订阅代理退役
+
+Context:
+
+- 用户提出“单纯拟 OC + 原网出即可，不必套代理”。进一步检查确认 Windows 系统代理
+  已关闭、没有 TUN，本机真直连出口是 `183.34.233.18`。
+- 该出口上官方 OpenCode 1.19.3 CLI 直连运行成功（rc=0，无 abuse 错误），
+  网关 `local-v1016` / `ref-on-v1` 两种官方形状都返回 200。
+- 订阅节点与共享 Clash 节点要么超时，要么仍被 IP abuse 门封禁。
+
+Implemented:
+
+- Windows `.env`：`PROXY_MODE=direct`，代理池清空。
+- WSL `/opt/freeopencodezen/.env`：`PROXY_MODE=direct`，代理池清空。
+- HK `/opt/freeopencodezen/.env`：`PROXY_MODE=required`，唯一节点
+  `http://127.0.0.1:17895`。
+- WSL `mihomo-oc.service`：配置改为仅 DIRECT 监听器 `127.0.0.1:17897`，
+  删除订阅 provider 与订阅 token；`hk-tunnel-mihomo.service` 只保留
+  `17895 → 17897`。
+- 旧订阅节点从三处代理池删除；Windows/WSL 代理池为空。
+
+Verified:
+
+- 官方 CLI 直连 rc=0；网关两种官方形状直连 200。
+- Windows 5/5、WSL 5/5、香港 5/5；香港公网非流式 200、流式 200（含 `[DONE]`）。
+- 香港直连中继的 `probe-free-tier` 返回 `status=200, kind=ok`。
+- 三处 `/health` 的 `upstreamFreeTier.tripped=false`。

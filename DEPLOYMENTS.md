@@ -100,43 +100,35 @@ Because the logon task boots the distro at sign-in, a normal reboot restores the
 | Surface | `API_SURFACE` unset (all) |
 | Log | `logs\service.log` |
 
-## 免费层出口拓扑（2026-10-18）
+## 免费层出口：直接网络（2026-10-19）
 
-免费层的 403 由**出口 IP 信誉**决定；当前只使用 WSL 上独立运行的
-`mihomo-oc.service`，它从订阅中筛出两个已验证节点并暴露为固定 HTTP 监听器：
+实测结论：官方请求形状 + **干净原网直连** 就足够；共享订阅/Clash 节点要么在
+当前网络不可达，要么已经被上游 IP abuse 门封禁。当前部署：
 
-| WSL 监听 | 固定节点 | 用途 |
+| 实例 | 模式 | 出口 |
 |---|---|---|
-| `127.0.0.1:17895` | `🇭🇰香港-02` | 备用（当前因上游 abuse 检测禁用） |
-| `127.0.0.1:17896` | `🇯🇵日本-02` | 主出口 |
-| `127.0.0.1:17898` | `🇯🇵日本-03` | 备用出口 |
-| `127.0.0.1:17890` | fallback 组 | 调试/兼容，不作为网关主路径 |
+| Windows 桌面 | `PROXY_MODE=direct` | 本机直连 `183.34.233.18`，代理池为空 |
+| WSL `Ubuntu-26.04` | `PROXY_MODE=direct` | WSL 直连（同一原网出口），代理池为空 |
+| 香港 `ocz.oxygenai.top` | `PROXY_MODE=required` | 唯一节点 `http://127.0.0.1:17895` → WSL `127.0.0.1:17897` (`DIRECT`) → 原网直连 |
 
-网关代理池不再挂 Clash：共享 Clash 出口曾返回 403 并触发共享熔断。当前三处：
-
-| 实例 | 代理池 |
-|---|---|
-| Windows 桌面 | `http://172.22.43.103:17896`、`http://172.22.43.103:17898`（WSL IP；17895 保留禁用） |
-| WSL `Ubuntu-26.04` | `http://127.0.0.1:17896`、`http://127.0.0.1:17898`（17895 保留禁用） |
-| 香港 `ocz.oxygenai.top` | 反向 SSH 隧道 `127.0.0.1:17893` → WSL `17896`、`127.0.0.1:17894` → WSL `17898`（17892 → 17895 保留禁用） |
-
-WSL 的两个 systemd 单元：
+WSL 的 `mihomo-oc.service` 已不再加载订阅：配置里只有一个 `DIRECT` HTTP 监听器
+`127.0.0.1:17897`，没有 provider、没有订阅 token。`hk-tunnel-mihomo.service`
+只保留一条反向隧道 `17895 → 17897`。香港本机 IP 仍被门禁拒绝，所以
+`PROXY_MODE=required` 禁止它回落到香港直连。
 
 ```bash
-systemctl status mihomo-oc          # 出口客户端与固定监听器
-systemctl status hk-tunnel-mihomo   # 到香港的 17892/17893/17894 反向隧道
+systemctl status mihomo-oc          # 仅 DIRECT 监听器
+systemctl status hk-tunnel-mihomo   # 仅 17895 → 17897
 ```
 
-注意事项：
+验证：
 
-- 网关按**最久未使用优先**轮换节点；某个节点被上游 403/429/传输错误冷却后，
-  请求自动转到另一个节点，不再把全部流量压在一个 IP 上。
-- 香港本机无法直连订阅节点（`kr-01...` 的 65501/65504/65505 实测超时），
-  所以香港免费层依赖这台工作站与 WSL 在线；香港直连仍会被门禁 403。
-- Windows 代理池里的 WSL IP 会随发行版重启变化（当前 `172.22.43.103`）；
-  变化时用 `PATCH /admin/proxies/:id` 更新两个节点。
-- 出口节点一律用管理接口维护，不要手改 `proxies.json`：
-  `POST /admin/proxies`，`Authorization: Bearer <ADMIN_PASSWORD>`。
+- 官方 OpenCode 1.19.3 CLI 在本机直连返回成功（无 abuse 错误）。
+- 网关 `local-v1016` 与 `ref-on-v1` 两种官方形状直连均 `200`。
+- Windows、WSL、香港三处各 5 轮连续请求全部 `200`；香港公网非流式/流式
+  也均 `200`，流式含 `[DONE]`。
+- 香港直连 `http://127.0.0.1:17895` 的 `probe-free-tier` 返回
+  `status=200, kind=ok`。
 
 ## Updating a Linux deployment
 

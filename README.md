@@ -46,7 +46,9 @@ OpenCodeProxyHub 默认内置以下免费模型，均可通过 OpenAI 兼容接�
 
 > **上游指纹门（2026-10-11 起，2026-10-17 静态提取、2026-10-18 动态修正）**：免费层已从 `/zen/v1` 迁到 `/inference/v1`，旧路径对匿名请求一律返回 `403 FreeTierError`。网关按官方 CLI 的实际请求构造：走 `/inference/v1`；强制 `stream: true`（非流式客户端由网关把 SSE 折叠成单个 JSON 响应）；请求体带 `bash` 与 `read` 两个工具（按小写名精确匹配，各自带真实参数 schema，缺失即 403，网关会自动补齐占位工具）；请求头为官方客户端对 `opencode/*` provider 发的那一组 —— `x-opencode-session-id` 与 `x-opencode-session` 同值、`x-opencode-project: global`、`x-opencode-request`（每请求一个 `msg_` id）、`x-opencode-client: cli`，以及 `User-Agent: opencode/1.19.3 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14`；**不发** `HTTP-Referer`，也默认不发 `x-session-affinity` / `x-session-id`（那两个是官方给非 OpenCode provider 用的，需要旧行为时用 `ZEN_LEGACY_SESSION_HEADERS=1`）。session id 前 12 位 hex 必须是取反后的时间戳（`ses_` 降序），纯随机或摘要派生即拒。请求头与 id 铸造来自官方 v1.19.3 产物的静态提取，UA 版本由受控动态捕获修正为 `4.0.23`；两份证据见 `OpenCode-REA-2026-10-17/06-free-tier-fingerprint.zh.md` 与 `07-dynamic-verification.zh.md`。上游错误现在按真实状态码透传（403 不再被改写成 429）。
 
-> **出口信誉与轮换（2026-10-17，2026-10-18 增加 LRU 轮换，2026-10-19 区分错误类型）**：门禁判定的是**出口 IP**，不是请求形态——同一份请求在大陆直连是 403、经普通代理出口则是 200。网关因此在指纹通道上做出口轮换：403 `FreeTierError` 先按错误文本分类——客户端身份门用 `FREE_TIER_BAN_COOLDOWN_MS`，出口 IP abuse 门用 `FREE_TIER_ABUSE_COOLDOWN_MS`（默认 1 小时）；传输层失败（TLS 重置/断连）只冷却 60 秒后换出口重试；429 短暂冷却后换出口重试；全部尝试失败才触发共享熔断。代理池按**最久未使用优先**选择节点（权重只在并列时参与排序），避免所有请求压在同一个出口 IP 上被上游按 IP 限流。尝试次数与冷却分别由 `FREE_TIER_RETRY_ATTEMPTS`、`FREE_TIER_BAN_COOLDOWN_MS`、`FREE_TIER_TRANSPORT_COOLDOWN_MS`、`FREE_TIER_ABUSE_COOLDOWN_MS`、`FREE_TIER_GATE_COOLDOWN_MS`、`FREE_TIER_ABUSE_GATE_COOLDOWN_MS` 控制；没有配置任何出口节点时行为回退到"直连 → 403 → 熔断"。当前活动出口是 WSL `mihomo-oc` 的 `日本-02` / `日本-03` 固定监听器；`香港-02` 因上游 abuse 检测暂缓启用并保留为备用。Windows、WSL 直接使用这些监听器，香港实例通过 WSL 发起的反向 SSH 隧道使用同一组出口。
+> **最终出口方案（2026-10-19）**：免费层不需要上游代理。实测本机真直连 `183.34.233.18` 对官方请求形状和官方 TUI 都返回 200；订阅节点/共享 Clash 节点则要么超时、要么被 IP abuse 门封禁。现在 Windows 与 WSL 实例使用 `PROXY_MODE=direct`，不挂任何代理节点；香港实例使用 `PROXY_MODE=required` 加一条直连中继 `127.0.0.1:17895 → WSL 127.0.0.1:17897 (DIRECT)`，把请求送回同一条干净原网出口，禁止回落到香港本机 IP。订阅节点已退出生产路径。
+
+> **代理/轮换逻辑仍然保留**（2026-10-17 起）：403 `FreeTierError` 会先按错误文本分类——客户端身份门用 `FREE_TIER_BAN_COOLDOWN_MS`，出口 IP abuse 门用 `FREE_TIER_ABUSE_COOLDOWN_MS`（默认 1 小时）；传输层失败只冷却 60 秒；429 短暂冷却；全部尝试失败才触发共享熔断。代理池按最久未使用优先选择节点，适用于未来确有多个干净出口的场景；当前部署不使用它。
 
 > **两类 `FreeTierError` 不要混淆（2026-10-19）**：上游把两种完全不同的失败都包成 `403 FreeTierError`。第一类是**客户端身份门**（“can only be used from within OpenCode”），复刻官方请求头/工具/会话形状即可通过；第二类是**出口 IP 信誉门**（“abusive traffic … VPN or proxy”），它只认 IP/网络信誉，与请求形状无关。实测官方 OpenCode 1.19.3 CLI 在同一个被封出口上也会得到同样的 abuse 错误，所以“复刻 TUI”只能解决第一类。网关现在用 `free_tier_gated` 与 `free_tier_ip_abuse` 两个 code 区分，并在 `/health` 的 `upstreamFreeTier.kind` 中暴露类型。可用 `POST /admin/proxies/:id/probe-free-tier` 对一个节点发一条官方最小请求，返回 `kind=ok|client_identity|ip_abuse`。
 
@@ -367,7 +369,7 @@ REDIS_URL=                              # 留空=内存限流；填写=Redis 分
 REDIS_KEY_PREFIX=opencode-proxy-hub:limit
 SHUTDOWN_DRAIN_TIMEOUT_MS=30000         # 优雅停机排空超时
 STORE_PLAINTEXT_API_KEYS=false          # 是否额外保存可恢复明文
-PROXY_MODE=optional                     # 代理使用模式：direct / optional / required
+PROXY_MODE=direct                       # 代理使用模式：direct / optional / required（香港实例使用 required + 直连中继）
 OUTBOUND_PRE_PROXY_ENABLED=false        # 是否启用链式前置代理
 OUTBOUND_PRE_PROXY_URL=                 # 前置代理地址（http/https）
 REQUIRE_PROXY=false                     # 兼容旧配置；未设置 PROXY_MODE 时 true 等价于 required
