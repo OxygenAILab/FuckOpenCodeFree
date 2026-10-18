@@ -100,27 +100,42 @@ Because the logon task boots the distro at sign-in, a normal reboot restores the
 | Surface | `API_SURFACE` unset (all) |
 | Log | `logs\service.log` |
 
-## 免费层出口节点（2026-10-17）
+## 免费层出口拓扑（2026-10-18）
 
-免费层的 `403 FreeTierError` 由**出口 IP 信誉**决定，因此每个实例都需要在代理池里
-至少挂一个可用出口。当前配置：
+免费层的 403 由**出口 IP 信誉**决定；当前只使用 WSL 上独立运行的
+`mihomo-oc.service`，它从订阅中筛出两个已验证节点并暴露为固定 HTTP 监听器：
 
-| 实例 | 出口节点 | 权重 | 状态 |
-|---|---|---|---|
-| Windows 桌面 | `http://127.0.0.1:7890`（本机 Clash） | 10 | 已验证 200 |
-| Windows 桌面 | `http://172.22.43.103:7890`（WSL Clash） | 5 | 备用，已验证 200 |
-| WSL `Ubuntu-26.04` | `http://127.0.0.1:7890`（WSL Clash） | 10 | 已验证 200 |
-| 香港 `ocz.oxygenai.top` | 无 | — | 直连出口 403，免费层不可用 |
+| WSL 监听 | 固定节点 | 用途 |
+|---|---|---|
+| `127.0.0.1:17895` | `🇭🇰香港-02` | 主出口 |
+| `127.0.0.1:17896` | `🇯🇵日本-02` | 备用出口 |
+| `127.0.0.1:17890` | fallback 组 | 调试/兼容，不作为网关主路径 |
+
+网关代理池不再挂 Clash：共享 Clash 出口曾返回 403 并触发共享熔断。当前三处：
+
+| 实例 | 代理池 |
+|---|---|
+| Windows 桌面 | `http://172.22.43.103:17895`、`http://172.22.43.103:17896`（WSL IP） |
+| WSL `Ubuntu-26.04` | `http://127.0.0.1:17895`、`http://127.0.0.1:17896` |
+| 香港 `ocz.oxygenai.top` | 反向 SSH 隧道 `127.0.0.1:17892` → WSL `17895`、`127.0.0.1:17893` → WSL `17896` |
+
+WSL 的两个 systemd 单元：
+
+```bash
+systemctl status mihomo-oc          # 出口客户端与固定监听器
+systemctl status hk-tunnel-mihomo   # 到香港的 17892/17893 反向隧道
+```
 
 注意事项：
 
-- WSL 的 IP 会随发行版重启变化（当前 `172.22.43.103`）。Windows 上的备用节点指向
-  该 IP，`wsl --terminate` 之后需要用 `wsl.exe -d Ubuntu-26.04 -- hostname -I`
-  的新结果更新该节点（控制台或 `PATCH /admin/proxies/:id`），否则它会连接失败。
+- 网关按**最久未使用优先**轮换节点；某个节点被上游 403/429/传输错误冷却后，
+  请求自动转到另一个节点，不再把全部流量压在一个 IP 上。
+- 香港本机无法直连订阅节点（`kr-01...` 的 65501/65504/65505 实测超时），
+  所以香港免费层依赖这台工作站与 WSL 在线；香港直连仍会被门禁 403。
+- Windows 代理池里的 WSL IP 会随发行版重启变化（当前 `172.22.43.103`）；
+  变化时用 `PATCH /admin/proxies/:id` 更新两个节点。
 - 出口节点一律用管理接口维护，不要手改 `proxies.json`：
   `POST /admin/proxies`，`Authorization: Bearer <ADMIN_PASSWORD>`。
-- 香港实例要恢复免费层，必须提供一个在门禁看来干净的出口节点；该机器本地没有
-  运行任何代理，直连 IP 被判 403。
 
 ## Updating a Linux deployment
 

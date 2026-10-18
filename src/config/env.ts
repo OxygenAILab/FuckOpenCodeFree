@@ -116,7 +116,7 @@ export const loadConfig = (): AppConfig => ({
   zenFreeNaming: !(process.env.ZEN_PATH || "/inference/v1/chat/completions").includes("/zen/go/"),
   zenRequiresFingerprint: (process.env.ZEN_PATH || "/inference/v1/chat/completions").includes("/inference/"),
   zenOpencodeUa:
-    process.env.ZEN_OPENCODE_UA || "opencode/1.19.3 ai-sdk/provider-utils/4.0.45 runtime/bun/1.3.14",
+    process.env.ZEN_OPENCODE_UA || "opencode/1.19.3 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14",
   zenLegacySessionHeaders: boolFromEnv("ZEN_LEGACY_SESSION_HEADERS", false),
   // TypeSafe's System One decision models (`jev-*`) answer on a sibling path
   // with their own request shape; they are not chat models.

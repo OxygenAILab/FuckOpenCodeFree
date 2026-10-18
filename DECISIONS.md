@@ -2,6 +2,39 @@
 
 短小的决策台账，防止后续 agent 重复提议已经否决过的方向。
 
+## 2026-10-18 — 免费层 UA 按动态验证修正为 4.0.23
+
+**背景**：2026-10-17 的第 6 篇 REA 文档从 Bun bundle 里静态扫到了
+`ai-sdk/provider-utils/4.0.45`，于是网关默认 UA 先按该字符串校准。2026-10-18
+把官方 v1.19.3 CLI 指向受控回环捕获服务器后，实际请求里的 UA 是
+`opencode/1.19.3 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14`。两者来自
+bundle 内不同位置的 provider-utils 副本，运行时生效的是 `4.0.23`。
+
+**决定**：`ZEN_OPENCODE_UA` 默认值改为
+`opencode/1.19.3 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14`；第 7 篇动态
+验证文档作为 UA 版本的优先证据，第 6 篇保留静态提取记录并标注更正。
+
+## 2026-10-18 — 代理池改为 LRU 轮换，出口收敛为两个已验证节点
+
+**背景**：实测发现同一批请求连续命中最高权重节点时，上游会按出口 IP 触发
+`FreeTierError` / abuse 403；一个节点被冷却后，如果池里混有已被标记的 Clash
+出口，重试会再次 403 并触发共享熔断。免费层的瓶颈是**单 IP 请求密度**，不是
+请求形态。
+
+**决定**：
+
+1. `ProxyPoolStore.acquire()` 改为**最久未使用优先**，权重仅在并列时排序；
+   请求在健康节点间自然轮换。
+2. 免费层代理池只保留 WSL `mihomo-oc` 的两个固定监听器：
+   `香港-02` 与 `日本-02`。共享 Clash 出口因实测返回 403 被移出池子。
+3. 香港实例通过 WSL 发起的反向 SSH 隧道使用同一对节点；香港本机订阅节点
+   实测不可达，不把失败节点放进池子。
+4. 单节点 403/429/传输错误仍按其冷却策略退出，另一个节点继续服务；
+   只有全部节点失败才触发共享熔断。
+
+**验证**：Windows、WSL、香港各 10 轮连续请求均为 200；在单节点返回 403 后，
+LRU 自动把后续流量切到另一节点，`upstreamFreeTier.tripped` 保持 `false`。
+
 ## 2026-10-17 — 不做客户端伪装，改为熔断
 
 **背景**：上游把免费层的客户端指纹门又收紧了一次，三处部署 6 个 Key 全部 403
@@ -93,7 +126,7 @@ WSL Clash 权重 5）；WSL 实例挂本机 Clash；香港实例仍未接出口�
 **官方形态**（`providerID` 以 `opencode` 开头时）：
 
 ```
-User-Agent: opencode/<CLI 版本> ai-sdk/provider-utils/4.0.45 runtime/bun/1.3.14
+User-Agent: opencode/<CLI 版本> ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14
 x-opencode-session-id / x-opencode-session: 同值（ses_ 降序 id）
 x-opencode-project: git 首个提交 hash；无仓库时字面量 global
 x-opencode-request: 该轮用户消息 id（msg_ 升序）

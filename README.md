@@ -44,9 +44,9 @@ OpenCodeProxyHub 默认内置以下免费模型，均可通过 OpenAI 兼容接�
 
 > **区域说明**：`beam`、`muse-spark-1.2-contributor`、`muse-spark-1.3-contributor` 会被上游按地区限制（实测中国大陆出口返回 403 `This model is not available in your country`，经香港出口代理复测同样 403）；若所在区域不可用，直接禁用该模型即可。`muse-spark` 系列为 Contributor 定价（以 prompt/completion 换训练授权），使用前请阅读相关条款。
 
-> **上游指纹门（2026-10-11 起，2026-10-17 按官方客户端产物校准）**：免费层已从 `/zen/v1` 迁到 `/inference/v1`，旧路径对匿名请求一律返回 `403 FreeTierError`。网关按官方 CLI 的实际请求构造：走 `/inference/v1`；强制 `stream: true`（非流式客户端由网关把 SSE 折叠成单个 JSON 响应）；请求体带 `bash` 与 `read` 两个工具（按小写名精确匹配，各自带真实参数 schema，缺失即 403，网关会自动补齐占位工具）；请求头为官方客户端对 `opencode/*` provider 发的那一组 —— `x-opencode-session-id` 与 `x-opencode-session` 同值、`x-opencode-project: global`、`x-opencode-request`（每请求一个 `msg_` id）、`x-opencode-client: cli`，以及 `User-Agent: opencode/1.19.3 ai-sdk/provider-utils/4.0.45 runtime/bun/1.3.14`；**不发** `HTTP-Referer`，也默认不发 `x-session-affinity` / `x-session-id`（那两个是官方给非 OpenCode provider 用的，需要旧行为时用 `ZEN_LEGACY_SESSION_HEADERS=1`）。session id 前 12 位 hex 必须是取反后的时间戳（`ses_` 降序），纯随机或摘要派生即拒。以上取值来自对官方 v1.19.3 产物的静态提取，证据见 `OpenCode-REA-2026-10-17/06-free-tier-fingerprint.zh.md`。上游错误现在按真实状态码透传（403 不再被改写成 429）。
+> **上游指纹门（2026-10-11 起，2026-10-17 静态提取、2026-10-18 动态修正）**：免费层已从 `/zen/v1` 迁到 `/inference/v1`，旧路径对匿名请求一律返回 `403 FreeTierError`。网关按官方 CLI 的实际请求构造：走 `/inference/v1`；强制 `stream: true`（非流式客户端由网关把 SSE 折叠成单个 JSON 响应）；请求体带 `bash` 与 `read` 两个工具（按小写名精确匹配，各自带真实参数 schema，缺失即 403，网关会自动补齐占位工具）；请求头为官方客户端对 `opencode/*` provider 发的那一组 —— `x-opencode-session-id` 与 `x-opencode-session` 同值、`x-opencode-project: global`、`x-opencode-request`（每请求一个 `msg_` id）、`x-opencode-client: cli`，以及 `User-Agent: opencode/1.19.3 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14`；**不发** `HTTP-Referer`，也默认不发 `x-session-affinity` / `x-session-id`（那两个是官方给非 OpenCode provider 用的，需要旧行为时用 `ZEN_LEGACY_SESSION_HEADERS=1`）。session id 前 12 位 hex 必须是取反后的时间戳（`ses_` 降序），纯随机或摘要派生即拒。请求头与 id 铸造来自官方 v1.19.3 产物的静态提取，UA 版本由受控动态捕获修正为 `4.0.23`；两份证据见 `OpenCode-REA-2026-10-17/06-free-tier-fingerprint.zh.md` 与 `07-dynamic-verification.zh.md`。上游错误现在按真实状态码透传（403 不再被改写成 429）。
 
-> **出口信誉与轮换（2026-10-17）**：门禁判定的是**出口 IP**，不是请求形态——同一份请求在大陆直连是 403、经普通代理出口则是 200。网关因此在指纹通道上做出口轮换：403 `FreeTierError` 把该节点冷却 15 分钟后换出口并用新 session 重试；传输层失败（TLS 重置/断连）只冷却 60 秒后换出口重试；429 短暂冷却后换出口重试；全部尝试失败才触发共享熔断。尝试次数与冷却分别由 `FREE_TIER_RETRY_ATTEMPTS`、`FREE_TIER_BAN_COOLDOWN_MS`、`FREE_TIER_TRANSPORT_COOLDOWN_MS`、`FREE_TIER_GATE_COOLDOWN_MS` 控制；没有配置任何出口节点时行为回退到"直连 → 403 → 熔断"。经过验证的部署方式：每个实例在代理池里挂一个可用的本地/远端代理节点即可恢复免费层。
+> **出口信誉与轮换（2026-10-17，2026-10-18 增加 LRU 轮换）**：门禁判定的是**出口 IP**，不是请求形态——同一份请求在大陆直连是 403、经普通代理出口则是 200。网关因此在指纹通道上做出口轮换：403 `FreeTierError` 把该节点冷却 15 分钟后换出口并用新 session 重试；传输层失败（TLS 重置/断连）只冷却 60 秒后换出口重试；429 短暂冷却后换出口重试；全部尝试失败才触发共享熔断。代理池按**最久未使用优先**选择节点（权重只在并列时参与排序），避免所有请求压在同一个出口 IP 上被上游按 IP 限流。尝试次数与冷却分别由 `FREE_TIER_RETRY_ATTEMPTS`、`FREE_TIER_BAN_COOLDOWN_MS`、`FREE_TIER_TRANSPORT_COOLDOWN_MS`、`FREE_TIER_GATE_COOLDOWN_MS` 控制；没有配置任何出口节点时行为回退到"直连 → 403 → 熔断"。当前已验证的稳定出口是 WSL `mihomo-oc` 的两个固定监听器（`香港-02` / `日本-02`）；Windows、WSL 直接用它们，香港实例通过 WSL 发起的反向 SSH 隧道使用同一对出口。
 
 新部署会自动生成以上默认模型；已有部署升级后，缺失的默认免费模型会自动追加到已有 `models.json`，不会覆盖用户已修改的模型配置。带旧 `-free` 后缀的条目会在升级时自动禁用并标注 `(retired: Renamed to …)`；上游已下线的模型（如 `mimo-v2.5-free`、`ling-3.0-flash-fin-free`、`laguna-s-2.1-free`、`deepseek-v4-flash-free`、`hy3-free`、`x-preview-f-free`、`north-mini-code-free`、`longcat-2.0-free`）同样会自动禁用并标记原因，用户无需手动清理。此前被自动禁用的模型若重新上线，升级后会仅恢复带下线标注的条目自动重新启用；用户手动关闭的不受影响。
 
@@ -347,7 +347,7 @@ ADMIN_PASSWORD=admin                    # 管理接口/控制台密码（务必�
 ZEN_HOST=opencode.ai                    # 上游主机
 ZEN_PATH=/inference/v1/chat/completions  # 上游对话补全路径
 ZEN_SYSTEMONE_PATH=/inference/v1/systemone  # 上游 System One（jev-*）路径
-ZEN_OPENCODE_UA=opencode/1.19.3 ai-sdk/provider-utils/4.0.45 runtime/bun/1.3.14  # 指纹通道 UA
+ZEN_OPENCODE_UA=opencode/1.19.3 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14  # 指纹通道 UA
 ZEN_LEGACY_SESSION_HEADERS=0            # 1=额外发送 x-session-affinity / x-session-id（旧形态）
 API_SURFACE=all                          # all=全协议；openai=只挂 OpenAI 三条路由
 UPSTREAM_TIMEOUT_MS=120000              # 上游超时

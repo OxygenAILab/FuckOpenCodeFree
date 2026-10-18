@@ -129,7 +129,15 @@ export class ProxyPoolStore {
       .filter((node) => !node.cooldownUntil || Date.parse(node.cooldownUntil) <= now)
       .filter((node) => node.dailyRequestLimit === 0 || node.dailyRequestCount < node.dailyRequestLimit)
       .filter((node) => node.currentConcurrency < node.maxConcurrency)
-      .sort((a, b) => b.weight - a.weight);
+      // Spread free-tier traffic across the pool: the upstream rate-limits by
+      // egress IP, so always taking the highest-weight node turns a healthy
+      // pool into one hot IP. Least-recently-used wins; weight breaks ties.
+      .sort((a, b) => {
+        const aLast = a.lastUsedAt ? Date.parse(a.lastUsedAt) : 0;
+        const bLast = b.lastUsedAt ? Date.parse(b.lastUsedAt) : 0;
+        if (aLast !== bLast) return aLast - bLast;
+        return b.weight - a.weight;
+      });
 
     const node = candidates[0];
     if (!node) return { node: null, requiredUnavailable: this.settingsStore.get().proxyMode === "required" };

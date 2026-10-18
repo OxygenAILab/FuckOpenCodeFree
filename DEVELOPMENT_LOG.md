@@ -1500,7 +1500,8 @@ Implemented:
   发送的那一组 —— `x-opencode-session-id` + `x-opencode-session`（同值）、
   `x-opencode-project: global`、`x-opencode-request`（每请求 `msg_` 升序 id）、
   `x-opencode-client: cli`，UA 取自 `ZEN_OPENCODE_UA`（默认
-  `opencode/1.19.3 ai-sdk/provider-utils/4.0.45 runtime/bun/1.3.14`）。
+  `opencode/1.19.3 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14`；2026-10-18
+  动态验证更正了当天早些时候静态命中的 `4.0.45`）。
 - 新增 `applyZenSessionHeaders()`：轮换/重试只改这两个官方 session 头；若开启
   `ZEN_LEGACY_SESSION_HEADERS=1` 则同时维护 `x-session-affinity` / `x-session-id`。
 - `src/config/env.ts`：新增 `zenOpencodeUa` 与 `zenLegacySessionHeaders`。
@@ -1512,3 +1513,58 @@ Verified:
   默认不发别名头、legacy 开关、重试后请求 id 不变），全部通过。
 - Windows 实例流式 `200`（含 `[DONE]`）；WSL 实例 `200`（内容 `ok`）；两处均用同一个
   v4 构建包更新。
+
+## 2026-10-18 — 动态验证修正免费层 UA
+
+Context:
+
+- 第 6 篇静态提取把 bundle 内命中的 `ai-sdk/provider-utils/4.0.45` 当成运行时值；
+  2026-10-18 的受控动态捕获证明官方 CLI 实际发出 `4.0.23`。
+
+Implemented:
+
+- `src/config/env.ts`：`ZEN_OPENCODE_UA` 默认值改为
+  `opencode/1.19.3 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14`。
+- REA 交付物新增 `07-dynamic-verification.zh.md`，并在 `06` 顶部加入更正说明；
+  README/DECISIONS/VERIFICATION 的历史记录同步修正。
+- 离线单测 `_scratch/zen-probe-20261017/rotate-unit-test.mjs` 的 UA 断言同步更新。
+
+Verified:
+
+- 动态捕获原始记录：`OpenCode-REA-2026-10-17/data/extract-dynamic-capture.jsonl`
+  （37,877 B，SHA-256 `5B477AD12182FA90B13A7E087E858C3B08F1829B9DC0A32229FC0CA3467850D5`）。
+- `npm run typecheck`、`npm run build` 与离线单测通过。
+
+## 2026-10-18 — LRU 轮换与三处固定出口
+
+Context:
+
+- 出口池原先总是先取最高权重节点。8 个连续请求全压在 `香港-02` 上后，
+  上游按出口 IP 返回 403；如果池里还有被标记的 Clash 出口，重试会再次 403
+  并触发共享熔断。
+- 香港本机无法直连订阅节点（`kr-01...` 的 65501/65504/65505 实测超时），
+  但 WSL 能正常使用其中两个节点。
+
+Implemented:
+
+- `src/proxy/proxyPool.ts`：`acquire()` 改为最久未使用优先，权重只在并列时排序；
+  请求随健康节点轮换。
+- WSL `mihomo-oc.service`：订阅筛选为 `香港-02` / `日本-02`，并增加固定监听器
+  `17895` / `17896`。
+- WSL `hk-tunnel-mihomo.service`：向香港暴露 `17892 → 17895`、
+  `17893 → 17896` 两条反向 SSH 隧道，香港网关使用这两个本地节点。
+- Windows 与 WSL 网关同样只挂这两个固定监听器；共享 Clash 出口从免费层池子移除。
+
+Verified:
+
+- `npm run typecheck`、`npm run build`、离线单测全部通过；新增 LRU 断言
+  `lruFirstIsA` / `lruSecondIsB` 为 true。
+- Windows、WSL、香港各 10 轮连续请求：10/10 成功。
+- 单节点 403 后 LRU 自动切换另一节点，共享熔断保持 `tripped=false`。
+- 公网 `POST https://ocz.oxygenai.top/v1/chat/completions`：非流式 200、
+  流式 200 且含 `[DONE]`。
+
+Deployments:
+
+- 代码同步至 Windows、WSL `/opt/freeopencodezen`、香港 `/opt/freeopencodezen`。
+- WSL 的 `mihomo-oc.service` 与 `hk-tunnel-mihomo.service` 均已 enable 并 active。

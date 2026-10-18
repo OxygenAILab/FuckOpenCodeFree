@@ -342,7 +342,7 @@ Bun `1.3.14`。据此把网关指纹通道校准为官方形态，离线单测�
 
 | 断言 | 结果 |
 |---|---|
-| UA 等于 `opencode/1.19.3 ai-sdk/provider-utils/4.0.45 runtime/bun/1.3.14` | PASS |
+| UA 等于 `opencode/1.19.3 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14` | PASS |
 | `x-opencode-client: cli` | PASS |
 | `x-opencode-project: global` | PASS |
 | `x-opencode-session-id` 与 `x-opencode-session` 同值 | PASS |
@@ -353,3 +353,43 @@ Bun `1.3.14`。据此把网关指纹通道校准为官方形态，离线单测�
 
 校准后三处部署复测：Windows 实例流式 `200`（含 `[DONE]`）、WSL 实例 `200`
 （内容 `ok`）；香港实例健康正常但仍因出口 IP 被门禁拒绝。
+
+### 动态验证修正（2026-10-18）
+
+用 `OPENCODE_CONFIG_CONTENT` 把官方 v1.19.3 CLI 指向回环捕获服务器，在 WSL 中
+真实运行一轮请求；原始请求已存档到
+`OpenCode-REA-2026-10-17/data/extract-dynamic-capture.jsonl`（37,877 B）。捕获
+结果显示运行时 UA 为 `opencode/1.19.3 ai-sdk/provider-utils/4.0.23
+runtime/bun/1.3.14`，不是静态扫描命中的 `4.0.45`。据此更新 `env.ts` 默认值、
+离线断言与全部相关文档；动态方法、原始头集与修正理由见
+`OpenCode-REA-2026-10-17/07-dynamic-verification.zh.md`。
+
+### LRU 轮换与固定出口拓扑（2026-10-18）
+
+**代码验证**
+
+- `npm run typecheck`、`npm run build` 通过。
+- `_scratch/zen-probe-20261017/rotate-unit-test.mjs` 全部 PASS，新增断言：
+  `lruFirstIsA=true`、`lruSecondIsB=true`（两个健康节点按最久未使用顺序交替）。
+
+**部署验证**
+
+| 实例 | 连续请求 | 结果 | 备注 |
+|---|---:|---|---|
+| Windows 桌面 | 10 | 10×200 | 流式与 `/v1/responses` 亦 200 |
+| WSL `Ubuntu-26.04` | 10 | 10×200 | 同一个 LRU 构建 |
+| 香港 `ocz.oxygenai.top` | 10 | 10×200 | 本机 + 公网各复测 |
+
+在 WSL 与香港实测中，`🇭🇰香港-02` 先返回一次 403 后进入冷却；LRU/轮换逻辑
+立即把后续请求切到 `🇯🇵日本-02`，没有触发共享熔断（`tripped=false`），
+连续请求仍全部 200。最终公网验收：
+`POST https://ocz.oxygenai.top/v1/chat/completions` 非流式 200，流式 200 且含
+`[DONE]`。
+
+**最终出口拓扑**
+
+- WSL `mihomo-oc.service`：`127.0.0.1:17895` 固定到 `香港-02`，
+  `127.0.0.1:17896` 固定到 `日本-02`。
+- WSL `hk-tunnel-mihomo.service`：向香港暴露 `17892 → 17895`、
+  `17893 → 17896`。
+- 三处网关代理池只用这两个已验证节点；共享 Clash 出口因实测 403 被移出池子。
